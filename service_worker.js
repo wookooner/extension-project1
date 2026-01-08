@@ -8,6 +8,10 @@ const SETTINGS_KEY = 'pdtm_settings_v1';
 const EVENTS_KEY = 'pdtm_events_v1';
 const MAX_EVENTS_DEFAULT = 1000;
 
+// Promise Chain for Serialization (Mutex-like behavior)
+// This ensures that concurrent navigation events do not overwrite storage updates.
+let updateQueue = Promise.resolve();
+
 // 1. Utility: Extract Hostname
 const getDomain = (urlStr) => {
   try {
@@ -30,45 +34,60 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 // 3. Main Event Listener
-chrome.webNavigation.onCompleted.addListener(async (details) => {
-  if (details.frameId !== 0) return;
+chrome.webNavigation.onCompleted.addListener((details) => {
+  // Enqueue the operation to prevent race conditions
+  updateQueue = updateQueue.then(async () => {
+    
+    // Filter: Main Frame only
+    if (details.frameId !== 0) return;
 
-  const domain = getDomain(details.url);
-  if (!domain) return;
+    const domain = getDomain(details.url);
+    if (!domain) return;
 
-  const data = await chrome.storage.local.get([EVENTS_KEY, SETTINGS_KEY]);
-  const settings = data[SETTINGS_KEY] || { collectionEnabled: true, maxEvents: MAX_EVENTS_DEFAULT };
-  
-  if (!settings.collectionEnabled) return;
+    // Fetch Data
+    const data = await chrome.storage.local.get([EVENTS_KEY, SETTINGS_KEY]);
+    const settings = data[SETTINGS_KEY] || { collectionEnabled: true, maxEvents: MAX_EVENTS_DEFAULT };
+    
+    if (!settings.collectionEnabled) return;
 
-  const events = data[EVENTS_KEY] || [];
-  const timestamp = Date.now();
+    const events = data[EVENTS_KEY] || [];
+    const timestamp = Date.now();
 
-  // Dedupe (Burst Prevention)
-  if (events.length > 0) {
-    const lastEvent = events[0];
-    if (lastEvent.domain === domain && (timestamp - lastEvent.ts < 2000)) {
-      return; 
+    // Dedupe (Burst Prevention: < 2s)
+    if (events.length > 0) {
+      const lastEvent = events[0];
+      if (lastEvent.domain === domain && (timestamp - lastEvent.ts < 2000)) {
+        return; 
+      }
     }
-  }
 
-  // A. Store Raw Event (Log)
-  const newEvent = {
-    ts: timestamp,
-    domain: domain,
-    type: 'page_view'
-  };
-  const updatedEvents = [newEvent, ...events].slice(0, settings.maxEvents);
-  await chrome.storage.local.set({ [EVENTS_KEY]: updatedEvents });
-  
-  // B. Update Domain State (Aggregation)
-  // Chapter 2: Updating the long-term stats immediately
-  await updateDomainState(domain, timestamp, chrome.storage.local);
-  
-  // Update Badge
-  if (updatedEvents.length > 0) {
-    chrome.action.setBadgeText({ text: updatedEvents.length.toString() });
-    chrome.action.setBadgeBackgroundColor({ color: '#6366f1' }); 
-  }
+    // A. Store Raw Event (Log)
+    const newEvent = {
+      ts: timestamp,
+      domain: domain,
+      type: 'page_view'
+    };
+    const updatedEvents = [newEvent, ...events].slice(0, settings.maxEvents);
+    await chrome.storage.local.set({ [EVENTS_KEY]: updatedEvents });
+    
+    // B. Update Domain State (Aggregation)
+    // Critical: This is now serialized via updateQueue
+    await updateDomainState(domain, timestamp, chrome.storage.local);
+    
+    // C. Update Badge (UX Improvement: Show "Today's" count)
+    const startOfToday = new Date().setHours(0, 0, 0, 0);
+    const todayCount = updatedEvents.filter(e => e.ts >= startOfToday).length;
+    
+    if (todayCount > 0) {
+      // Use a shorthand if > 999 (e.g., 1k+)
+      const text = todayCount > 999 ? '1k+' : todayCount.toString();
+      chrome.action.setBadgeText({ text });
+      chrome.action.setBadgeBackgroundColor({ color: '#6366f1' }); 
+    } else {
+      chrome.action.setBadgeText({ text: '' });
+    }
 
+  }).catch(err => {
+    console.error("PDTM Service Worker Error:", err);
+  });
 }, { url: [{ schemes: ['http', 'https'] }] });

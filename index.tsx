@@ -124,7 +124,8 @@ const Popup = () => {
 
   // Actions
   const handleClear = async () => {
-    if (confirm('Delete all locally stored traces?')) {
+    // Clarity: Explicitly state that settings are preserved.
+    if (confirm('Permanently delete all tracking history?\n\n- Clears Events\n- Clears Domain Stats\n- PRESERVES your settings')) {
       await api.set({ 
         [EVENTS_KEY]: [], 
         [DOMAIN_STATE_KEY]: {} 
