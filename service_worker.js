@@ -10,6 +10,12 @@ const MAX_EVENTS_DEFAULT = 1000;
 
 // Promise Chain for Serialization (Mutex-like behavior)
 // This ensures that concurrent navigation events do not overwrite storage updates.
+//
+// [Architecture Note]
+// Currently, this queue is unbounded. If events trigger faster than storage writes,
+// the queue length and memory usage will grow.
+// For Chapter 2 scale (personal browsing), this is acceptable.
+// Future optimization (Chapter 4+): Implement coalescing (batching last update) or a bounded buffer.
 let updateQueue = Promise.resolve();
 
 // 1. Utility: Extract Hostname

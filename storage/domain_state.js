@@ -19,6 +19,11 @@ export const DOMAIN_STATE_KEY = 'pdtm_domain_state_v1';
  * @param {Object} storageAPI - Abstracted storage interface (has .get and .set)
  */
 export async function updateDomainState(domain, timestamp, storageAPI) {
+  // [Architecture Note]
+  // Currently, this reads and writes the entire state map.
+  // This is susceptible to performance issues if the map grows very large.
+  // Roadmap: Migrate to IndexedDB for atomic, key-level updates in Chapter 4+.
+  
   // 1. Fetch entire state map (Simple for Chapter 2 scale)
   const data = await storageAPI.get([DOMAIN_STATE_KEY]);
   const stateMap = data[DOMAIN_STATE_KEY] || {};
