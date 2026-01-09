@@ -2,23 +2,22 @@
 // Role: Logic Engine (Signals -> Estimation)
 // Pure functions only. No storage access.
 
-import { ActivityLevel } from './activity_levels.js';
+import { ActivityLevel, ActivityEstimation } from './activity_levels.js';
 import { SIGNAL_CODES } from './signal_codes.js';
 
 /**
  * Evaluates a list of signals to determine the activity level.
  * Priority: TRANSACTION > UGC > ACCOUNT > VIEW
  */
-export function evaluateSignals(signals) {
+export function evaluateSignals(signals: string[]): ActivityEstimation {
   const uniqueSignals = new Set(signals);
-  const reasons = [];
+  const reasons: string[] = [];
 
   // 1. Transaction Check
   if (uniqueSignals.has(SIGNAL_CODES.URL_CHECKOUT) || uniqueSignals.has(SIGNAL_CODES.DOM_PAYMENT)) {
-    const matched = Array.from(uniqueSignals).filter(s => 
+    reasons.push(...Array.from(uniqueSignals).filter(s => 
       s === SIGNAL_CODES.URL_CHECKOUT || s === SIGNAL_CODES.DOM_PAYMENT
-    );
-    reasons.push(...matched);
+    ));
     return {
       level: ActivityLevel.TRANSACTION,
       confidence: uniqueSignals.size > 1 ? "high" : "medium",
@@ -28,10 +27,9 @@ export function evaluateSignals(signals) {
 
   // 2. UGC Check
   if (uniqueSignals.has(SIGNAL_CODES.URL_EDITOR) || uniqueSignals.has(SIGNAL_CODES.DOM_EDITOR)) {
-    const matched = Array.from(uniqueSignals).filter(s => 
+    reasons.push(...Array.from(uniqueSignals).filter(s => 
       s === SIGNAL_CODES.URL_EDITOR || s === SIGNAL_CODES.DOM_EDITOR
-    );
-    reasons.push(...matched);
+    ));
     return {
       level: ActivityLevel.UGC,
       confidence: "medium",
@@ -46,10 +44,9 @@ export function evaluateSignals(signals) {
     uniqueSignals.has(SIGNAL_CODES.URL_ACCOUNT) ||
     uniqueSignals.has(SIGNAL_CODES.DOM_PASSWORD)
   ) {
-    const matched = Array.from(uniqueSignals).filter(s => 
+    reasons.push(...Array.from(uniqueSignals).filter(s => 
       [SIGNAL_CODES.URL_LOGIN, SIGNAL_CODES.URL_SIGNUP, SIGNAL_CODES.URL_ACCOUNT, SIGNAL_CODES.DOM_PASSWORD].includes(s)
-    );
-    reasons.push(...matched);
+    ));
     return {
       level: ActivityLevel.ACCOUNT,
       confidence: "high",
@@ -68,8 +65,8 @@ export function evaluateSignals(signals) {
 /**
  * Analyzes URL string for keyword signals
  */
-export function extractUrlSignals(urlStr) {
-  const signals = [];
+export function extractUrlSignals(urlStr: string): string[] {
+  const signals: string[] = [];
   try {
     const url = new URL(urlStr);
     const path = url.pathname.toLowerCase();
