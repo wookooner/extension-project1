@@ -3,11 +3,14 @@
 // Logic: Navigation -> Filter -> Dedupe -> Store Event -> Update Domain State
 // Updated for Chapter 3: Triggers Retention Check
 // Updated for Chapter 4: Activity Classification (Navigation + DOM Signals)
+// Updated for Chapter 5: Risk Calculation & User Overrides
 
 import { updateDomainState } from './storage/domain_state.js';
 import { performRetentionCheck } from './jobs/retention_job.js';
 import { classify } from './jobs/classifier_job.js';
 import { updateActivityState } from './storage/activity_state.js';
+import { updateRiskForDomain } from './jobs/risk_job.js'; // Chapter 5
+import { updateUserOverride } from './storage/user_overrides.js'; // Chapter 5
 
 const SETTINGS_KEY = 'pdtm_settings_v1';
 const EVENTS_KEY = 'pdtm_events_v1';
@@ -79,8 +82,12 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     // C. Chapter 4: Activity Classification (URL-based)
     const estimation = classify(details.url, []); // No explicit signals yet
     await updateActivityState(domain, estimation, timestamp, chrome.storage.local);
+
+    // D. Chapter 5: Risk Calculation
+    // Must run AFTER activity/domain state updates
+    await updateRiskForDomain(domain, chrome.storage.local);
     
-    // D. Update Badge
+    // E. Update Badge
     const startOfToday = new Date().setHours(0, 0, 0, 0);
     const todayCount = updatedEvents.filter(e => e.ts >= startOfToday).length;
     
@@ -92,7 +99,7 @@ chrome.webNavigation.onCompleted.addListener((details) => {
       chrome.action.setBadgeText({ text: '' });
     }
 
-    // E. Retention Check
+    // F. Retention Check
     await performRetentionCheck(chrome.storage.local);
 
   }).catch(err => {
@@ -135,12 +142,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Re-classify using the DOM signals
       const estimation = classify(payload.url, payload.signals);
       
-      // Update State
+      // Update Activity State
       await updateActivityState(domain, estimation, payload.timestamp, chrome.storage.local);
+
+      // Chapter 5: Re-calculate Risk based on new signals (e.g. found payment field -> Risk goes up)
+      await updateRiskForDomain(domain, chrome.storage.local);
+
       console.log(`[PDTM] DOM Signal processed for ${domain}:`, estimation.level);
 
     }).catch(err => {
       console.error("Signal Processing Error:", err);
     });
+  }
+
+  // C. Chapter 5: User Override (UI)
+  if (message.type === 'SET_OVERRIDE') {
+    const { domain, overrides } = message.payload; // overrides = { pinned: true, etc. }
+    
+    updateQueue = updateQueue.then(async () => {
+       // 1. Update the override store
+       await updateUserOverride(domain, overrides, chrome.storage.local);
+       
+       // 2. Re-calculate Risk for this domain immediately
+       await updateRiskForDomain(domain, chrome.storage.local);
+
+       return true;
+    }).then(() => {
+       sendResponse({ success: true });
+    }).catch(err => {
+       sendResponse({ success: false, error: err.message });
+    });
+    return true; // Keep channel open
   }
 });

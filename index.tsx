@@ -17,7 +17,12 @@ import {
   Eye,
   User,
   PenTool,
-  CreditCard
+  CreditCard,
+  AlertTriangle,
+  Pin,
+  CheckCircle,
+  EyeOff,
+  Tag
 } from 'lucide-react';
 
 // Declare chrome to avoid TS errors
@@ -50,11 +55,8 @@ interface RetentionPolicy {
 }
 
 // Chapter 4: Activity State
-// P1-1: Use string literals to match backend strings directly, avoiding Enum drift.
-// These values MUST match signals/activity_levels.ts
 type ActivityLevelType = "view" | "account" | "ugc" | "transaction";
 
-// Helper object for code readability (acting as pseudo-enum)
 const ActivityLevels: Record<string, ActivityLevelType> = {
   VIEW: "view",
   ACCOUNT: "account",
@@ -70,6 +72,31 @@ interface DomainActivityState {
   last_account_touch_ts?: number;
   last_transaction_signal_ts?: number;
 }
+
+// Chapter 5: Risk & Overrides
+interface RiskRecord {
+  score: number; // 0-100
+  confidence: string;
+  reasons: string[];
+  last_updated_ts: number;
+}
+
+interface UserOverride {
+  pinned: boolean;
+  whitelisted: boolean;
+  ignored: boolean;
+  category: string | null; // "finance", "auth", etc.
+  updated_ts: number;
+}
+
+const CATEGORY_OPTIONS = [
+  { value: 'finance', label: 'Finance' },
+  { value: 'auth', label: 'Auth/SSO' },
+  { value: 'shopping', label: 'Shopping' },
+  { value: 'social', label: 'Social' },
+  { value: 'cloud', label: 'Cloud' },
+  { value: 'other', label: 'Other' },
+];
 
 // --- ENVIRONMENT DETECTION ---
 
@@ -115,6 +142,8 @@ const SETTINGS_KEY = 'pdtm_settings_v1';
 const DOMAIN_STATE_KEY = 'pdtm_domain_state_v1';
 const POLICY_KEY = 'pdtm_retention_policy_v1';
 const ACTIVITY_STATE_KEY = 'pdtm_activity_state_v1'; // Chapter 4
+const RISK_STATE_KEY = 'pdtm_risk_state_v1'; // Chapter 5
+const USER_OVERRIDES_KEY = 'pdtm_user_overrides_v1'; // Chapter 5
 
 const DEFAULT_POLICY: RetentionPolicy = {
   raw_events_ttl_days: 30,
@@ -133,13 +162,22 @@ const getActivityIcon = (level: ActivityLevelType | undefined) => {
   }
 };
 
-const getActivityLabel = (level: ActivityLevelType | undefined) => {
-  switch (level) {
-    case ActivityLevels.TRANSACTION: return "Transaction";
-    case ActivityLevels.UGC: return "Created Content";
-    case ActivityLevels.ACCOUNT: return "Account Access";
-    default: return "Passive View";
-  }
+const getRiskColor = (score: number) => {
+  if (score >= 70) return 'bg-rose-100 text-rose-700 border-rose-200';
+  if (score >= 40) return 'bg-amber-100 text-amber-700 border-amber-200';
+  return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+};
+
+const formatTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+const formatRelative = (ts: number) => {
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(ts).toLocaleDateString();
 };
 
 // --- COMPONENT: Popup UI ---
@@ -148,18 +186,24 @@ const Popup = () => {
   const [events, setEvents] = useState<RawEvent[]>([]);
   const [domainStates, setDomainStates] = useState<Record<string, DomainState>>({});
   const [activityStates, setActivityStates] = useState<Record<string, DomainActivityState>>({});
+  const [riskStates, setRiskStates] = useState<Record<string, RiskRecord>>({});
+  const [overrides, setOverrides] = useState<Record<string, UserOverride>>({});
+  
   const [settings, setSettings] = useState<AppSettings>({ collectionEnabled: true, maxEvents: 1000 });
   const [policy, setPolicy] = useState<RetentionPolicy>(DEFAULT_POLICY);
   
-  const [activeTab, setActiveTab] = useState<'recent' | 'top' | 'settings'>('recent');
+  const [activeTab, setActiveTab] = useState<'recent' | 'risk' | 'settings'>('recent');
   const [loading, setLoading] = useState(true);
 
   // Load Data
   const refreshData = async () => {
-    const data = await api.get([EVENTS_KEY, SETTINGS_KEY, DOMAIN_STATE_KEY, POLICY_KEY, ACTIVITY_STATE_KEY]);
+    const data = await api.get([EVENTS_KEY, SETTINGS_KEY, DOMAIN_STATE_KEY, POLICY_KEY, ACTIVITY_STATE_KEY, RISK_STATE_KEY, USER_OVERRIDES_KEY]);
     setEvents(data[EVENTS_KEY] || []);
     setDomainStates(data[DOMAIN_STATE_KEY] || {});
     setActivityStates(data[ACTIVITY_STATE_KEY] || {});
+    setRiskStates(data[RISK_STATE_KEY] || {});
+    setOverrides(data[USER_OVERRIDES_KEY] || {});
+
     if (data[SETTINGS_KEY]) {
       setSettings(data[SETTINGS_KEY]);
     }
@@ -169,15 +213,9 @@ const Popup = () => {
 
   useEffect(() => {
     refreshData();
-
     if (isExtensionEnv) {
       const listener = (changes: any, areaName: string) => {
-        if (areaName === 'local') {
-          // Check for any relevant key changes
-          if (Object.keys(changes).some(k => [EVENTS_KEY, SETTINGS_KEY, DOMAIN_STATE_KEY, POLICY_KEY, ACTIVITY_STATE_KEY].includes(k))) {
-            refreshData();
-          }
-        }
+        if (areaName === 'local') refreshData();
       };
       chrome.storage.onChanged.addListener(listener);
       return () => chrome.storage.onChanged.removeListener(listener);
@@ -189,85 +227,74 @@ const Popup = () => {
   }, []);
 
   // Actions
+  const handleTogglePause = async () => {
+    const newStatus = !settings.collectionEnabled;
+    await api.set({ [SETTINGS_KEY]: { ...settings, collectionEnabled: newStatus } });
+    refreshData();
+  };
+
   const handleClear = async () => {
-    if (confirm('Permanently delete all tracking history?\n\n- Clears Events\n- Clears Domain Stats\n- Clears Activity Levels\n- PRESERVES your settings\n- RESETS Cleanup Timer')) {
+    if (confirm('Permanently delete all tracking history?')) {
       const data = await api.get([POLICY_KEY]);
-      const currentPolicy = data[POLICY_KEY] || DEFAULT_POLICY;
-      
       await api.set({ 
         [EVENTS_KEY]: [], 
         [DOMAIN_STATE_KEY]: {},
         [ACTIVITY_STATE_KEY]: {},
-        [POLICY_KEY]: { ...currentPolicy, last_cleanup_ts: 0 }
+        [RISK_STATE_KEY]: {},
+        [POLICY_KEY]: { ...(data[POLICY_KEY] || DEFAULT_POLICY), last_cleanup_ts: 0 }
       });
-      
       if (isExtensionEnv) chrome.action.setBadgeText({ text: '' });
       refreshData();
     }
   };
 
-  const handleTogglePause = async () => {
-    const newStatus = !settings.collectionEnabled;
-    await api.set({ 
-      [SETTINGS_KEY]: { ...settings, collectionEnabled: newStatus } 
-    });
-    refreshData();
-  };
-
-  const handlePolicyChange = async (key: keyof RetentionPolicy, value: number) => {
-    const newPolicy = { ...policy, [key]: value };
-    await api.set({ [POLICY_KEY]: newPolicy });
-    setPolicy(newPolicy);
+  const handleOverride = async (domain: string, partial: Partial<UserOverride>) => {
+    if (isExtensionEnv) {
+      await chrome.runtime.sendMessage({ type: 'SET_OVERRIDE', payload: { domain, overrides: partial } });
+    } else {
+      // Mock for simulator
+      const current = overrides[domain] || { pinned: false, whitelisted: false, ignored: false, category: null, updated_ts: 0 };
+      const updated = { ...current, ...partial, updated_ts: Date.now() };
+      const newOverrides = { ...overrides, [domain]: updated };
+      await api.set({ [USER_OVERRIDES_KEY]: newOverrides });
+      refreshData();
+    }
   };
 
   const handleRunCleanup = async () => {
     if (isExtensionEnv) {
-      try {
-        const response: any = await chrome.runtime.sendMessage({ type: 'RUN_CLEANUP', force: true });
-        if (chrome.runtime.lastError) {
-          alert("Error connecting to Service Worker.");
-          return;
-        }
-        if (response && response.success) {
-          const { stats } = response;
-          alert(stats ? `Cleanup complete.\n\nEvents Removed: ${stats.eventsRemoved}\nDomains Pruned: ${stats.domainsPruned}` : 'Cleanup ran but no action was needed.');
-          refreshData();
-        } else {
-          alert('Cleanup failed: ' + (response?.error || 'Unknown error'));
-        }
-      } catch (e) {
-        alert('Failed to trigger cleanup.');
-      }
-    } else {
-      alert("Simulation for Cleanup not fully implemented in preview for Chapter 4 complex structures.");
+      const response: any = await chrome.runtime.sendMessage({ type: 'RUN_CLEANUP', force: true });
+      if (response?.success) refreshData();
     }
   };
 
-  // Derived State
-  const topDomains = useMemo(() => {
-    return Object.values(domainStates)
-      .sort((a, b) => b.visit_count_total - a.visit_count_total)
-      .slice(0, 10);
-  }, [domainStates]);
+  // Derived Data
+  const recentEvents = useMemo(() => [...events].slice(0, 20), [events]);
+  
+  const riskList = useMemo(() => {
+    // Combine RiskState + Overrides + ActivityState for the list
+    return Object.keys(riskStates)
+      .map(domain => {
+        const risk = riskStates[domain];
+        const override = overrides[domain];
+        const activity = activityStates[domain];
+        
+        // Filter ignored domains (unless viewing settings/debug)
+        if (override?.ignored) return null;
 
-  const recentEvents = useMemo(() => {
-    return [...events].slice(0, 20); 
-  }, [events]);
-
-  // Utility: Time format
-  const formatTime = (ts: number) => {
-    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
-
-  const formatRelative = (ts: number) => {
-    const diff = Date.now() - ts;
-    const mins = Math.floor(diff / 60000);
-    if (mins < 1) return 'Just now';
-    if (mins < 60) return `${mins}m ago`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours}h ago`;
-    return new Date(ts).toLocaleDateString();
-  };
+        return {
+          domain,
+          score: risk.score,
+          reasons: risk.reasons,
+          level: activity?.last_estimation_level,
+          pinned: override?.pinned || false,
+          whitelisted: override?.whitelisted || false,
+          category: override?.category || null
+        };
+      })
+      .filter(item => item !== null)
+      .sort((a, b) => (b?.score || 0) - (a?.score || 0)); // Sort by Score DESC
+  }, [riskStates, overrides, activityStates]);
 
   if (loading) return <div className="h-full flex items-center justify-center text-slate-400">Loading...</div>;
 
@@ -278,7 +305,7 @@ const Popup = () => {
       <div className="bg-slate-900 text-white p-4 shrink-0 flex justify-between items-center">
         <div className="flex items-center gap-2">
           <Shield size={18} className="text-indigo-400" />
-          <h1 className="font-bold text-sm tracking-wide">PDTM <span className="text-slate-500 text-xs font-normal">v0.4</span></h1>
+          <h1 className="font-bold text-sm tracking-wide">PDTM <span className="text-slate-500 text-xs font-normal">v0.5</span></h1>
         </div>
         <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium border ${settings.collectionEnabled ? 'bg-indigo-500/10 border-indigo-500/50 text-indigo-300' : 'bg-amber-500/10 border-amber-500/50 text-amber-300'}`}>
           <div className={`w-1.5 h-1.5 rounded-full ${settings.collectionEnabled ? 'bg-indigo-400 animate-pulse' : 'bg-amber-400'}`} />
@@ -286,37 +313,23 @@ const Popup = () => {
         </div>
       </div>
 
-      {/* Stats */}
-      <div className="p-4 bg-slate-50 border-b border-slate-200 flex justify-between items-end">
-        <div>
-          <p className="text-xs text-slate-500 uppercase font-semibold tracking-wider mb-1">Total Visits</p>
-          <div className="text-3xl font-bold text-slate-800 leading-none">
-            {Object.values(domainStates).reduce((acc, curr) => acc + curr.visit_count_total, 0)}
-          </div>
-        </div>
-        <div className="text-xs text-slate-400 text-right">
-          <p>Activity Classification On</p>
-          <p>Domains Tracked: {Object.keys(domainStates).length}</p>
-        </div>
-      </div>
-
       {/* Tabs */}
       <div className="flex border-b border-slate-200">
         <button 
           onClick={() => setActiveTab('recent')}
-          className={`flex-1 py-2 text-xs font-medium flex items-center justify-center gap-2 transition-colors ${activeTab === 'recent' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-slate-500 bg-slate-50 hover:bg-slate-100'}`}
+          className={`flex-1 py-3 text-xs font-medium flex items-center justify-center gap-2 transition-colors ${activeTab === 'recent' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-slate-500 bg-slate-50 hover:bg-slate-100'}`}
         >
           <Clock size={14} /> Recent
         </button>
         <button 
-          onClick={() => setActiveTab('top')}
-          className={`flex-1 py-2 text-xs font-medium flex items-center justify-center gap-2 transition-colors ${activeTab === 'top' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-slate-500 bg-slate-50 hover:bg-slate-100'}`}
+          onClick={() => setActiveTab('risk')}
+          className={`flex-1 py-3 text-xs font-medium flex items-center justify-center gap-2 transition-colors ${activeTab === 'risk' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-slate-500 bg-slate-50 hover:bg-slate-100'}`}
         >
-          <BarChart2 size={14} /> Top Sites
+          <AlertTriangle size={14} /> Attention
         </button>
         <button 
           onClick={() => setActiveTab('settings')}
-          className={`flex-1 py-2 text-xs font-medium flex items-center justify-center gap-2 transition-colors ${activeTab === 'settings' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-slate-500 bg-slate-50 hover:bg-slate-100'}`}
+          className={`flex-1 py-3 text-xs font-medium flex items-center justify-center gap-2 transition-colors ${activeTab === 'settings' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-slate-500 bg-slate-50 hover:bg-slate-100'}`}
         >
           <SettingsIcon size={14} /> Settings
         </button>
@@ -335,33 +348,21 @@ const Popup = () => {
           ) : (
             <ul className="divide-y divide-slate-100">
               {recentEvents.map((e, i) => {
-                // Determine Level for this domain
                 const actState = activityStates[e.domain];
-                const level = actState ? actState.last_estimation_level : ActivityLevels.VIEW;
-                
+                const level = actState ? actState.last_estimation_level : "view";
                 return (
-                  <li key={e.ts + '_' + i} className="p-3 hover:bg-slate-50 flex items-center gap-3 group animate-in fade-in slide-in-from-bottom-1 duration-200">
+                  <li key={e.ts + '_' + i} className="p-3 hover:bg-slate-50 flex items-center gap-3">
                     <div className="bg-slate-100 p-1.5 rounded text-slate-500 relative">
                       <Globe size={14} />
-                      {/* Badge */}
-                      {level !== ActivityLevels.VIEW && (
+                      {level !== "view" && (
                          <div className="absolute -top-1 -right-1 bg-white rounded-full p-0.5 shadow-sm border border-slate-100">
                             {getActivityIcon(level)}
                          </div>
                       )}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <div className="text-sm font-medium text-slate-800 truncate" title={e.domain}>{e.domain}</div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-slate-400 font-mono">{formatTime(e.ts)}</span>
-                        {level !== ActivityLevels.VIEW && (
-                           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200">
-                             {getActivityLabel(level)}
-                           </span>
-                        )}
-                      </div>
+                      <div className="text-sm font-medium text-slate-800 truncate">{e.domain}</div>
+                      <div className="text-xs text-slate-400 font-mono">{formatTime(e.ts)}</div>
                     </div>
                   </li>
                 );
@@ -370,46 +371,83 @@ const Popup = () => {
           )
         )}
 
-        {/* TAB: TOP SITES */}
-        {activeTab === 'top' && (
-          topDomains.length === 0 ? (
+        {/* TAB: ATTENTION (RISK) */}
+        {activeTab === 'risk' && (
+          riskList.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-slate-400 p-6 text-center">
-              <BarChart2 size={32} className="mb-2 opacity-20" />
-              <p className="text-sm">No domain stats yet.</p>
+              <Shield size={32} className="mb-2 opacity-20" />
+              <p className="text-sm">No significant activity analyzed yet.</p>
             </div>
           ) : (
-            <ul className="divide-y divide-slate-100">
-              {topDomains.map((state, i) => {
-                const actState = activityStates[state.domain];
-                const level = actState ? actState.last_estimation_level : ActivityLevels.VIEW;
-                
-                return (
-                  <li key={state.domain} className="p-3 hover:bg-slate-50 flex items-center justify-between group">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className={`text-xs font-mono w-5 h-5 flex items-center justify-center rounded ${i < 3 ? 'bg-indigo-100 text-indigo-700 font-bold' : 'bg-slate-100 text-slate-500'}`}>
-                        {i + 1}
-                      </span>
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-slate-800 truncate flex items-center gap-2">
-                          {state.domain}
-                          <span title={`Estimated: ${getActivityLabel(level)}`}>
-                             {getActivityIcon(level)}
-                          </span>
-                        </div>
-                        <div className="text-[10px] text-slate-400 flex items-center gap-1">
-                          {(Date.now() - state.last_seen < 86400000) && (
-                            <span className="w-1.5 h-1.5 rounded-full bg-green-400" title="Active recently"></span>
-                          )}
-                          Last: {formatRelative(state.last_seen)}
-                        </div>
-                      </div>
+            <ul className="divide-y divide-slate-100 pb-20">
+              {riskList.map((item: any) => (
+                <li key={item.domain} className="p-3 hover:bg-slate-50 group">
+                  <div className="flex justify-between items-start mb-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                       {/* Score Badge */}
+                       <div className={`px-2 py-0.5 rounded text-[10px] font-bold border ${getRiskColor(item.score)}`}>
+                         {item.score}
+                       </div>
+                       <div className="font-medium text-slate-800 text-sm truncate flex items-center gap-1">
+                         {item.pinned && <Pin size={10} className="text-indigo-500 fill-indigo-500" />}
+                         {item.domain}
+                       </div>
                     </div>
-                    <span className="text-xs font-bold text-slate-600 bg-slate-100 px-2 py-1 rounded-full">
-                      {state.visit_count_total}
-                    </span>
-                  </li>
-                );
-              })}
+                    <div className="flex items-center gap-1">
+                       <button 
+                         onClick={() => handleOverride(item.domain, { pinned: !item.pinned })}
+                         className={`p-1.5 rounded hover:bg-slate-200 transition-colors ${item.pinned ? 'text-indigo-600 bg-indigo-50' : 'text-slate-400'}`}
+                         title="Pin to prevent deletion"
+                       >
+                         <Pin size={14} />
+                       </button>
+                       <button 
+                         onClick={() => handleOverride(item.domain, { whitelisted: !item.whitelisted })}
+                         className={`p-1.5 rounded hover:bg-slate-200 transition-colors ${item.whitelisted ? 'text-emerald-600 bg-emerald-50' : 'text-slate-400'}`}
+                         title="Mark as safe (Reduce score)"
+                       >
+                         <CheckCircle size={14} />
+                       </button>
+                       <button 
+                         onClick={() => handleOverride(item.domain, { ignored: true })}
+                         className="p-1.5 rounded hover:bg-slate-200 text-slate-400 hover:text-red-500 transition-colors"
+                         title="Ignore/Hide"
+                       >
+                         <EyeOff size={14} />
+                       </button>
+                    </div>
+                  </div>
+
+                  {/* Details */}
+                  <div className="pl-0.5 space-y-2">
+                    <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                      <div className="flex items-center gap-1">
+                        {getActivityIcon(item.level)}
+                        <span className="capitalize">{item.level}</span>
+                      </div>
+                      <span className="text-slate-300">|</span>
+                      {item.reasons.length > 0 ? (
+                        <span className="truncate max-w-[150px]">{item.reasons.map((r:string) => r.replace('level_', '').replace('cat_', '')).join(', ')}</span>
+                      ) : <span>Passive</span>}
+                    </div>
+                    
+                    {/* Category Dropdown */}
+                    <div className="flex items-center gap-2">
+                      <Tag size={10} className="text-slate-400" />
+                      <select 
+                        className="text-[10px] bg-slate-100 border-none rounded py-0.5 px-1 text-slate-600 focus:ring-1 focus:ring-indigo-500 cursor-pointer w-24"
+                        value={item.category || ''}
+                        onChange={(e) => handleOverride(item.domain, { category: e.target.value || null })}
+                      >
+                        <option value="">No Tag</option>
+                        {CATEGORY_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </li>
+              ))}
             </ul>
           )
         )}
@@ -417,86 +455,17 @@ const Popup = () => {
         {/* TAB: SETTINGS */}
         {activeTab === 'settings' && (
           <div className="p-4 space-y-6">
+            <div className="bg-amber-50 p-3 rounded-lg border border-amber-100 text-amber-800 text-xs">
+              <h3 className="font-bold flex items-center gap-2 mb-1"><AlertTriangle size={12}/> Attention Score</h3>
+              <p>Scores are estimated based on interaction depth (Transactions, Logins) and frequency. They indicate "Management Necessity", not necessarily maliciousness.</p>
+            </div>
             
-            {/* Legend for Activity Levels */}
-            <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
-              <div className="text-xs font-bold text-slate-600 mb-2 uppercase tracking-wide flex items-center gap-1">
-                <Activity size={12} /> Activity Estimates
-              </div>
-              <div className="space-y-2">
-                 <div className="flex items-center gap-2 text-xs text-slate-700">
-                   <CreditCard size={12} className="text-rose-500" />
-                   <span className="font-medium">Transaction:</span> Checkout, Payment
-                 </div>
-                 <div className="flex items-center gap-2 text-xs text-slate-700">
-                   <PenTool size={12} className="text-purple-500" />
-                   <span className="font-medium">UGC:</span> Creating, Editing
-                 </div>
-                 <div className="flex items-center gap-2 text-xs text-slate-700">
-                   <User size={12} className="text-blue-500" />
-                   <span className="font-medium">Account:</span> Login, Settings
-                 </div>
-                 <div className="flex items-center gap-2 text-xs text-slate-700">
-                   <Eye size={12} className="text-slate-400" />
-                   <span className="font-medium">View:</span> Passive Browsing
-                 </div>
-              </div>
-              <p className="mt-3 text-[10px] text-slate-400 leading-tight">
-                * Estimations based on URL patterns and page elements. No content is stored.
-              </p>
-            </div>
-
-            {/* Log Retention */}
-            <div>
-              <div className="flex items-center gap-2 mb-2 text-slate-800 font-medium text-sm">
-                <Clock size={16} className="text-indigo-500" />
-                Raw Log Retention
-              </div>
-              <select 
-                value={policy.raw_events_ttl_days}
-                onChange={(e) => handlePolicyChange('raw_events_ttl_days', Number(e.target.value))}
-                className="w-full p-2 text-sm bg-slate-50 border border-slate-200 rounded-lg text-slate-700 focus:outline-none focus:border-indigo-500"
-              >
-                <option value={7}>7 Days</option>
-                <option value={30}>30 Days (Recommended)</option>
-                <option value={90}>90 Days</option>
-                <option value={0}>Forever (No Auto-Delete)</option>
-              </select>
-            </div>
-
-            {/* Domain Pruning */}
-            <div>
-              <div className="flex items-center gap-2 mb-2 text-slate-800 font-medium text-sm">
-                <Trash2 size={16} className="text-indigo-500" />
-                Prune Inactive Services
-              </div>
-              <select 
-                value={policy.prune_inactive_domains_days}
-                onChange={(e) => handlePolicyChange('prune_inactive_domains_days', Number(e.target.value))}
-                className="w-full p-2 text-sm bg-slate-50 border border-slate-200 rounded-lg text-slate-700 focus:outline-none focus:border-indigo-500"
-              >
-                <option value={90}>90 Days</option>
-                <option value={180}>6 Months (Recommended)</option>
-                <option value={365}>1 Year</option>
-                <option value={0}>Never Prune</option>
-              </select>
-            </div>
-
-            {/* Manual Action */}
-            <div className="pt-2 border-t border-slate-100">
-               <div className="flex justify-between items-center mb-2">
-                 <span className="text-xs text-slate-400">
-                   Last Cleanup: {policy.last_cleanup_ts ? formatRelative(policy.last_cleanup_ts) : 'Never'}
-                 </span>
-               </div>
-               <button 
+            <button 
                 onClick={handleRunCleanup}
-                className="w-full py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold hover:bg-indigo-100 flex items-center justify-center gap-2"
+                className="w-full py-2 bg-slate-100 text-slate-700 border border-slate-200 rounded-lg text-xs font-bold hover:bg-slate-200 flex items-center justify-center gap-2"
                >
-                 <Eraser size={14} /> Run Cleanup Now
-               </button>
-            </div>
-
+                 <Eraser size={14} /> Run Policy Cleanup
+            </button>
           </div>
         )}
 
@@ -517,15 +486,14 @@ const Popup = () => {
           onClick={handleClear}
           className="flex-1 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg text-xs font-medium hover:bg-red-50 hover:text-red-600 hover:border-red-200 flex items-center justify-center gap-1.5 transition-colors active:scale-95"
         >
-          <Trash2 size={14} /> Clear Data
+          <Trash2 size={14} /> Reset
         </button>
       </div>
     </div>
   );
 };
 
-// --- SIMULATOR TOOL (Only for this Web Preview) ---
-
+// --- SIMULATOR TOOL ---
 const DevSimulator = () => {
   const [simUrl, setSimUrl] = useState('https://www.google.com/account/login');
   
@@ -533,78 +501,9 @@ const DevSimulator = () => {
     try {
       const url = new URL(simUrl);
       if (!['http:', 'https:'].includes(url.protocol)) return alert('Invalid protocol');
-      const domain = url.hostname;
-      const timestamp = Date.now();
-      
-      const data = await api.get([EVENTS_KEY, SETTINGS_KEY, DOMAIN_STATE_KEY, ACTIVITY_STATE_KEY]);
-      const settings = data[SETTINGS_KEY] || { collectionEnabled: true, maxEvents: 1000 };
-      if (!settings.collectionEnabled) return alert('Collection Paused');
-
-      const events = data[EVENTS_KEY] || [];
-      const stateMap = data[DOMAIN_STATE_KEY] || {};
-      const activityMap = data[ACTIVITY_STATE_KEY] || {};
-
-      // 1. Dedupe Events
-      if (events.length > 0 && events[0].domain === domain && (timestamp - events[0].ts < 2000)) {
-        return console.log("Dedupe in Simulator");
-      }
-
-      // 2. Update Events
-      const newEvent = { ts: timestamp, domain, type: 'page_view' };
-      const updatedEvents = [newEvent, ...events].slice(0, settings.maxEvents);
-      
-      // 3. Update Domain State (Simulated Logic)
-      const record = stateMap[domain] || {
-        domain: domain,
-        first_seen: timestamp,
-        last_seen: 0,
-        visit_count_total: 0
-      };
-      record.last_seen = timestamp;
-      record.visit_count_total += 1;
-      stateMap[domain] = record;
-
-      // 4. Update Activity (Simplified for Simulator - no heuristics file import in browser)
-      let level = ActivityLevels.VIEW;
-      if (simUrl.includes('login')) level = ActivityLevels.ACCOUNT;
-      if (simUrl.includes('edit')) level = ActivityLevels.UGC;
-      if (simUrl.includes('checkout')) level = ActivityLevels.TRANSACTION;
-
-      const actRecord = activityMap[domain] || {
-        domain: domain,
-        last_estimation_level: ActivityLevels.VIEW,
-        last_estimation_ts: 0,
-        counts_by_level: {}
-      };
-
-      // P0-3 Logic for Simulator
-      const isReclass = (timestamp - actRecord.last_estimation_ts < 10000);
-      if (isReclass) {
-         if (actRecord.last_estimation_level !== level) {
-            if (actRecord.counts_by_level[actRecord.last_estimation_level] > 0) {
-               actRecord.counts_by_level[actRecord.last_estimation_level]--;
-            }
-            if (!actRecord.counts_by_level[level]) actRecord.counts_by_level[level] = 0;
-            actRecord.counts_by_level[level]++;
-         }
-      } else {
-         if (!actRecord.counts_by_level[level]) actRecord.counts_by_level[level] = 0;
-         actRecord.counts_by_level[level]++;
-      }
-      
-      actRecord.last_estimation_level = level;
-      actRecord.last_estimation_ts = timestamp;
-      activityMap[domain] = actRecord;
-
-      // 5. Save
-      await api.set({ 
-        [EVENTS_KEY]: updatedEvents,
-        [DOMAIN_STATE_KEY]: stateMap,
-        [ACTIVITY_STATE_KEY]: activityMap
-      });
-      
+      await chrome.webNavigation.onCompleted.dispatch({ frameId: 0, url: simUrl, timeStamp: Date.now() });
     } catch (e) {
-      alert('Invalid URL: ' + e);
+      alert('Simulation requires running via extension context or improved mock.');
     }
   };
 
@@ -614,10 +513,7 @@ const DevSimulator = () => {
         <Construction size={16} />
         <h3 className="font-bold text-sm">Dev Simulator</h3>
       </div>
-      <p className="text-xs text-slate-300 mb-3">
-        <b>Chapter 4 Active:</b> Activity Classification.<br/>
-        Try URLs with 'login', 'edit', 'checkout'.
-      </p>
+      <p className="text-xs text-slate-300 mb-3">Chapter 5: Check 'Attention' tab after visiting.</p>
       <input 
         value={simUrl} 
         onChange={e => setSimUrl(e.target.value)}
@@ -632,8 +528,6 @@ const DevSimulator = () => {
     </div>
   );
 };
-
-// --- APP ENTRY ---
 
 const App = () => {
   return (
