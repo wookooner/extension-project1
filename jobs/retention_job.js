@@ -1,9 +1,11 @@
 // --- Chapter 3: Retention Job ---
 // Role: Execute cleanup based on policy
 // Logic: Check Interval -> Filter Events -> Prune Domains -> Save
+// Updated for Chapter 4: Prunes Activity State
 
 import { getRetentionPolicy, setRetentionPolicy, POLICY_KEY } from '../storage/retention_policy.js';
 import { DOMAIN_STATE_KEY } from '../storage/domain_state.js';
+import { ACTIVITY_STATE_KEY } from '../storage/activity_state.js';
 
 // Duplicate constant to avoid importing from service_worker (circular dependency risk)
 const EVENTS_KEY = 'pdtm_events_v1';
@@ -26,11 +28,12 @@ export async function performRetentionCheck(storageAPI, force = false) {
   }
 
   // 2. Load Data
-  // [Architecture Note] Reading all data into memory is fine for Chapter 3.
-  // For Chapter 4+ with huge datasets, we will need IndexedDB cursors.
-  const data = await storageAPI.get([EVENTS_KEY, DOMAIN_STATE_KEY]);
+  // [Architecture Note] Reading all data into memory is fine for Chapter 3/4.
+  // For Chapter 5+ with huge datasets, we will need IndexedDB cursors.
+  const data = await storageAPI.get([EVENTS_KEY, DOMAIN_STATE_KEY, ACTIVITY_STATE_KEY]);
   let events = data[EVENTS_KEY] || [];
   let domainStates = data[DOMAIN_STATE_KEY] || {};
+  let activityStates = data[ACTIVITY_STATE_KEY] || {};
 
   const stats = {
     eventsRemoved: 0,
@@ -49,10 +52,7 @@ export async function performRetentionCheck(storageAPI, force = false) {
 
   // 4. Prune Inactive Domains (Time-based TTL)
   // Logic: Keep if (now - last_seen) < (ttl_days * 24h)
-  // [Architecture Note / Future Risk]
-  // Currently, we prune strictly by timestamp.
-  // In later chapters, we may need a "Risk Classification" or "User Whitelist" check
-  // to ensure critical or high-risk domains are not forgotten even if inactive.
+  // P1-2: Also prune from Activity State to maintain consistency
   if (policy.prune_inactive_domains_days > 0) {
     const cutoff = now - (policy.prune_inactive_domains_days * 86400000);
     const domains = Object.keys(domainStates);
@@ -61,7 +61,19 @@ export async function performRetentionCheck(storageAPI, force = false) {
       const state = domainStates[domain];
       if (state.last_seen < cutoff) {
         delete domainStates[domain];
+        // Prune Activity State as well
+        if (activityStates[domain]) {
+          delete activityStates[domain];
+        }
         stats.domainsPruned++;
+      }
+    });
+    
+    // Safety pass: Prune orphan activity states (if any exists without domain state)
+    // Optional but good for hygiene
+    Object.keys(activityStates).forEach(d => {
+      if (!domainStates[d]) {
+         delete activityStates[d];
       }
     });
   }
@@ -72,6 +84,7 @@ export async function performRetentionCheck(storageAPI, force = false) {
   await storageAPI.set({
     [EVENTS_KEY]: events,
     [DOMAIN_STATE_KEY]: domainStates,
+    [ACTIVITY_STATE_KEY]: activityStates,
     [POLICY_KEY]: policy
   });
 

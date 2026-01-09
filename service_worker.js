@@ -125,6 +125,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!domain) return;
 
     updateQueue = updateQueue.then(async () => {
+      // P0-2: Check Collection Enabled Guard
+      const data = await chrome.storage.local.get(SETTINGS_KEY);
+      const settings = data[SETTINGS_KEY] || { collectionEnabled: true };
+      if (!settings.collectionEnabled) return;
+
       const { payload } = message; // { url, signals, timestamp }
       
       // Re-classify using the DOM signals

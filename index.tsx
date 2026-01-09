@@ -50,16 +50,21 @@ interface RetentionPolicy {
 }
 
 // Chapter 4: Activity State
-enum ActivityLevel {
-  VIEW = "view",
-  ACCOUNT = "account",
-  UGC = "ugc",
-  TRANSACTION = "transaction"
-}
+// P1-1: Use string literals to match backend strings directly, avoiding Enum drift.
+// These values MUST match signals/activity_levels.ts
+type ActivityLevelType = "view" | "account" | "ugc" | "transaction";
+
+// Helper object for code readability (acting as pseudo-enum)
+const ActivityLevels: Record<string, ActivityLevelType> = {
+  VIEW: "view",
+  ACCOUNT: "account",
+  UGC: "ugc",
+  TRANSACTION: "transaction"
+};
 
 interface DomainActivityState {
   domain: string;
-  last_estimation_level: ActivityLevel;
+  last_estimation_level: ActivityLevelType;
   last_estimation_ts: number;
   counts_by_level: Record<string, number>;
   last_account_touch_ts?: number;
@@ -119,20 +124,20 @@ const DEFAULT_POLICY: RetentionPolicy = {
 
 // --- HELPERS ---
 
-const getActivityIcon = (level: ActivityLevel | undefined) => {
+const getActivityIcon = (level: ActivityLevelType | undefined) => {
   switch (level) {
-    case ActivityLevel.TRANSACTION: return <CreditCard size={12} className="text-rose-500" />;
-    case ActivityLevel.UGC: return <PenTool size={12} className="text-purple-500" />;
-    case ActivityLevel.ACCOUNT: return <User size={12} className="text-blue-500" />;
+    case ActivityLevels.TRANSACTION: return <CreditCard size={12} className="text-rose-500" />;
+    case ActivityLevels.UGC: return <PenTool size={12} className="text-purple-500" />;
+    case ActivityLevels.ACCOUNT: return <User size={12} className="text-blue-500" />;
     default: return <Eye size={12} className="text-slate-400" />;
   }
 };
 
-const getActivityLabel = (level: ActivityLevel | undefined) => {
+const getActivityLabel = (level: ActivityLevelType | undefined) => {
   switch (level) {
-    case ActivityLevel.TRANSACTION: return "Transaction";
-    case ActivityLevel.UGC: return "Created Content";
-    case ActivityLevel.ACCOUNT: return "Account Access";
+    case ActivityLevels.TRANSACTION: return "Transaction";
+    case ActivityLevels.UGC: return "Created Content";
+    case ActivityLevels.ACCOUNT: return "Account Access";
     default: return "Passive View";
   }
 };
@@ -332,14 +337,14 @@ const Popup = () => {
               {recentEvents.map((e, i) => {
                 // Determine Level for this domain
                 const actState = activityStates[e.domain];
-                const level = actState ? actState.last_estimation_level : ActivityLevel.VIEW;
+                const level = actState ? actState.last_estimation_level : ActivityLevels.VIEW;
                 
                 return (
                   <li key={e.ts + '_' + i} className="p-3 hover:bg-slate-50 flex items-center gap-3 group animate-in fade-in slide-in-from-bottom-1 duration-200">
                     <div className="bg-slate-100 p-1.5 rounded text-slate-500 relative">
                       <Globe size={14} />
                       {/* Badge */}
-                      {level !== ActivityLevel.VIEW && (
+                      {level !== ActivityLevels.VIEW && (
                          <div className="absolute -top-1 -right-1 bg-white rounded-full p-0.5 shadow-sm border border-slate-100">
                             {getActivityIcon(level)}
                          </div>
@@ -351,7 +356,7 @@ const Popup = () => {
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-slate-400 font-mono">{formatTime(e.ts)}</span>
-                        {level !== ActivityLevel.VIEW && (
+                        {level !== ActivityLevels.VIEW && (
                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200">
                              {getActivityLabel(level)}
                            </span>
@@ -376,7 +381,7 @@ const Popup = () => {
             <ul className="divide-y divide-slate-100">
               {topDomains.map((state, i) => {
                 const actState = activityStates[state.domain];
-                const level = actState ? actState.last_estimation_level : ActivityLevel.VIEW;
+                const level = actState ? actState.last_estimation_level : ActivityLevels.VIEW;
                 
                 return (
                   <li key={state.domain} className="p-3 hover:bg-slate-50 flex items-center justify-between group">
@@ -560,21 +565,35 @@ const DevSimulator = () => {
       stateMap[domain] = record;
 
       // 4. Update Activity (Simplified for Simulator - no heuristics file import in browser)
-      let level = ActivityLevel.VIEW;
-      if (simUrl.includes('login')) level = ActivityLevel.ACCOUNT;
-      if (simUrl.includes('edit')) level = ActivityLevel.UGC;
-      if (simUrl.includes('checkout')) level = ActivityLevel.TRANSACTION;
+      let level = ActivityLevels.VIEW;
+      if (simUrl.includes('login')) level = ActivityLevels.ACCOUNT;
+      if (simUrl.includes('edit')) level = ActivityLevels.UGC;
+      if (simUrl.includes('checkout')) level = ActivityLevels.TRANSACTION;
 
       const actRecord = activityMap[domain] || {
         domain: domain,
-        last_estimation_level: ActivityLevel.VIEW,
+        last_estimation_level: ActivityLevels.VIEW,
         last_estimation_ts: 0,
         counts_by_level: {}
       };
+
+      // P0-3 Logic for Simulator
+      const isReclass = (timestamp - actRecord.last_estimation_ts < 10000);
+      if (isReclass) {
+         if (actRecord.last_estimation_level !== level) {
+            if (actRecord.counts_by_level[actRecord.last_estimation_level] > 0) {
+               actRecord.counts_by_level[actRecord.last_estimation_level]--;
+            }
+            if (!actRecord.counts_by_level[level]) actRecord.counts_by_level[level] = 0;
+            actRecord.counts_by_level[level]++;
+         }
+      } else {
+         if (!actRecord.counts_by_level[level]) actRecord.counts_by_level[level] = 0;
+         actRecord.counts_by_level[level]++;
+      }
+      
       actRecord.last_estimation_level = level;
       actRecord.last_estimation_ts = timestamp;
-      if (!actRecord.counts_by_level[level]) actRecord.counts_by_level[level] = 0;
-      actRecord.counts_by_level[level]++;
       activityMap[domain] = actRecord;
 
       // 5. Save

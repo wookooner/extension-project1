@@ -3,6 +3,8 @@
 // Principle: Read-only, No Storage, Send "Codes" only
 
 (function() {
+  // P0-1: Normalize Signal Vocabulary
+  // MUST match signals/signal_codes.ts exactly.
   const SIGNAL_CODES = {
     DOM_PASSWORD: "dom_password",
     DOM_EDITOR: "dom_editor",
@@ -44,12 +46,18 @@
     }
   }
 
-  // Run once on idle
-  // In a real app, we might use MutationObserver, but for Chapter 4 MVP, one-shot is sufficient.
+  // P1-3: Retry mechanism for SPA / Late-loading elements
+  // Run immediately on load, then retry a few times to catch delayed UIs (modals, etc).
   if (document.readyState === 'complete') {
     setTimeout(probe, 1000);
+    setTimeout(probe, 3000);
+    setTimeout(probe, 5000);
   } else {
-    window.addEventListener('load', () => setTimeout(probe, 1000));
+    window.addEventListener('load', () => {
+      setTimeout(probe, 1000);
+      setTimeout(probe, 3000);
+      setTimeout(probe, 5000);
+    });
   }
 
 })();

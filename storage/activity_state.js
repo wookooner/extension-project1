@@ -18,6 +18,7 @@ export const ACTIVITY_STATE_KEY = 'pdtm_activity_state_v1';
 
 /**
  * Updates the activity state for a domain based on a new estimation.
+ * Handles "Upgrade" logic to prevent double-counting for the same visit.
  * @param {string} domain 
  * @param {Object} estimation - { level, confidence, reasons }
  * @param {number} timestamp 
@@ -39,11 +40,32 @@ export async function updateActivityState(domain, estimation, timestamp, storage
     }
   };
 
-  // 1. Increment Count
-  if (!record.counts_by_level[estimation.level]) {
-    record.counts_by_level[estimation.level] = 0;
+  // P0-3: Double Counting Prevention
+  // If this update is very close to the last one (e.g., < 10 seconds), 
+  // treat it as a "refinement" of the current visit rather than a new one.
+  const isReclassification = (timestamp - record.last_estimation_ts < 10000);
+
+  if (isReclassification) {
+    // Check if level changed (Upgrade/Change)
+    if (record.last_estimation_level !== estimation.level) {
+      // Decrement old bucket (if exists and > 0)
+      if (record.counts_by_level[record.last_estimation_level] > 0) {
+        record.counts_by_level[record.last_estimation_level]--;
+      }
+      // Increment new bucket
+      if (!record.counts_by_level[estimation.level]) {
+        record.counts_by_level[estimation.level] = 0;
+      }
+      record.counts_by_level[estimation.level]++;
+    }
+    // If level is same, do nothing to counts (just update timestamp/metadata below)
+  } else {
+    // New Visit
+    if (!record.counts_by_level[estimation.level]) {
+      record.counts_by_level[estimation.level] = 0;
+    }
+    record.counts_by_level[estimation.level]++;
   }
-  record.counts_by_level[estimation.level]++;
 
   // 2. Update Metadata
   record.last_estimation_level = estimation.level;
