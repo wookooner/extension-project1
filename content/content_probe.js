@@ -46,18 +46,19 @@
     }
   }
 
-  // P1-3: Retry mechanism for SPA / Late-loading elements
-  // Run immediately on load, then retry a few times to catch delayed UIs (modals, etc).
-  if (document.readyState === 'complete') {
+  // P1-3 & Recommendation B: Robust execution strategy
+  // Run immediately to catch existing elements, then retry to catch late-loading ones (SPA/Modals).
+  const runProbes = () => {
+    probe(); // Immediate
     setTimeout(probe, 1000);
     setTimeout(probe, 3000);
     setTimeout(probe, 5000);
+  };
+
+  if (document.readyState === 'complete') {
+    runProbes();
   } else {
-    window.addEventListener('load', () => {
-      setTimeout(probe, 1000);
-      setTimeout(probe, 3000);
-      setTimeout(probe, 5000);
-    });
+    window.addEventListener('load', runProbes);
   }
 
 })();

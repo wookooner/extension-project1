@@ -45,6 +45,15 @@ export async function updateActivityState(domain, estimation, timestamp, storage
   // treat it as a "refinement" of the current visit rather than a new one.
   const isReclassification = (timestamp - record.last_estimation_ts < 10000);
 
+  // [Architecture Note]
+  // Strategy: "Highest Level per Visit"
+  // When re-classifying (upgrading) a visit within the time window, we decrement the old level count
+  // and increment the new one.
+  // Example: View (passive) -> Account (login). 
+  // Result: 0 Views, 1 Account visit.
+  // Rationale: We want to track the "nature" of the visit, not every micro-step.
+  // This avoids inflating the total visit count. For funnel analysis, a different data model would be needed.
+
   if (isReclassification) {
     // Check if level changed (Upgrade/Change)
     if (record.last_estimation_level !== estimation.level) {
