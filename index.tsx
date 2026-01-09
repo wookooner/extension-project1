@@ -141,13 +141,17 @@ const Popup = () => {
 
   // Actions
   const handleClear = async () => {
-    if (confirm('Permanently delete all tracking history?\n\n- Clears Events\n- Clears Domain Stats\n- PRESERVES your settings')) {
+    if (confirm('Permanently delete all tracking history?\n\n- Clears Events\n- Clears Domain Stats\n- PRESERVES your settings\n- RESETS Cleanup Timer')) {
+      // Option 1: Reset last_cleanup_ts to 0 (Treating timeline as part of data)
+      const data = await api.get([POLICY_KEY]);
+      const currentPolicy = data[POLICY_KEY] || DEFAULT_POLICY;
+      
       await api.set({ 
         [EVENTS_KEY]: [], 
         [DOMAIN_STATE_KEY]: {},
-        // Reset last cleanup so it runs again soon if needed, or keep it? 
-        // Let's keep policy as is.
+        [POLICY_KEY]: { ...currentPolicy, last_cleanup_ts: 0 }
       });
+      
       if (isExtensionEnv) chrome.action.setBadgeText({ text: '' });
       refreshData();
     }
@@ -168,43 +172,78 @@ const Popup = () => {
   };
 
   const handleRunCleanup = async () => {
-    // Manually trigger cleanup logic (Re-implementing logic here or trigger SW)
-    // Since we can't easily call SW functions from Popup in all envs without messaging,
-    // We will implement a simple immediate cleanup here for the UI button.
-    const now = Date.now();
-    let updatedEvents = [...events];
-    let updatedDomains = { ...domainStates };
-    let changed = false;
-
-    // 1. Events TTL
-    if (policy.raw_events_ttl_days > 0) {
-      const cutoff = now - (policy.raw_events_ttl_days * 86400000);
-      const prevLen = updatedEvents.length;
-      updatedEvents = updatedEvents.filter(e => e.ts >= cutoff);
-      if (updatedEvents.length !== prevLen) changed = true;
-    }
-
-    // 2. Domain Pruning
-    if (policy.prune_inactive_domains_days > 0) {
-      const cutoff = now - (policy.prune_inactive_domains_days * 86400000);
-      Object.keys(updatedDomains).forEach(d => {
-        if (updatedDomains[d].last_seen < cutoff) {
-          delete updatedDomains[d];
-          changed = true;
+    // Requirement: Extension environment uses Messaging to ensure SSOT in Service Worker.
+    if (isExtensionEnv) {
+      try {
+        // Send message to SW
+        const response: any = await chrome.runtime.sendMessage({ type: 'RUN_CLEANUP', force: true });
+        
+        if (chrome.runtime.lastError) {
+          console.error(chrome.runtime.lastError);
+          alert("Error connecting to Service Worker.");
+          return;
         }
-      });
-    }
 
-    if (changed) {
-      await api.set({
-        [EVENTS_KEY]: updatedEvents,
-        [DOMAIN_STATE_KEY]: updatedDomains,
-        [POLICY_KEY]: { ...policy, last_cleanup_ts: now }
-      });
-      alert('Cleanup complete.');
-      refreshData();
+        if (response && response.success) {
+          const { stats } = response;
+          if (stats) {
+            alert(`Cleanup complete.\n\nEvents Removed: ${stats.eventsRemoved}\nDomains Pruned: ${stats.domainsPruned}`);
+          } else {
+            alert('Cleanup ran but no action was needed.');
+          }
+          refreshData();
+        } else {
+          alert('Cleanup failed: ' + (response?.error || 'Unknown error'));
+        }
+      } catch (e) {
+        console.error("Cleanup Request Failed", e);
+        alert('Failed to trigger cleanup.');
+      }
     } else {
-      alert('No data needed cleanup based on current policy.');
+      // Web Preview: Run local logic (Simulated SSOT)
+      // Since we are in a pure React preview without a background SW, we execute logic here.
+      // Ideally this duplicates retention_job.js, but it's acceptable for this environment.
+      const now = Date.now();
+      let updatedEvents = [...events];
+      let updatedDomains = { ...domainStates };
+      let changed = false;
+      let stats = { eventsRemoved: 0, domainsPruned: 0 };
+
+      // 1. Events TTL
+      if (policy.raw_events_ttl_days > 0) {
+        const cutoff = now - (policy.raw_events_ttl_days * 86400000);
+        const prevLen = updatedEvents.length;
+        updatedEvents = updatedEvents.filter(e => e.ts >= cutoff);
+        stats.eventsRemoved = prevLen - updatedEvents.length;
+        if (stats.eventsRemoved > 0) changed = true;
+      }
+
+      // 2. Domain Pruning
+      if (policy.prune_inactive_domains_days > 0) {
+        const cutoff = now - (policy.prune_inactive_domains_days * 86400000);
+        Object.keys(updatedDomains).forEach(d => {
+          if (updatedDomains[d].last_seen < cutoff) {
+            delete updatedDomains[d];
+            stats.domainsPruned++;
+            changed = true;
+          }
+        });
+      }
+
+      if (changed) {
+        await api.set({
+          [EVENTS_KEY]: updatedEvents,
+          [DOMAIN_STATE_KEY]: updatedDomains,
+          [POLICY_KEY]: { ...policy, last_cleanup_ts: now }
+        });
+        alert(`[Simulated] Cleanup complete.\n\nEvents Removed: ${stats.eventsRemoved}\nDomains Pruned: ${stats.domainsPruned}`);
+        refreshData();
+      } else {
+        // Even if nothing changed, update timestamp
+        await api.set({ [POLICY_KEY]: { ...policy, last_cleanup_ts: now } });
+        alert('No data needed cleanup based on current policy.');
+        refreshData();
+      }
     }
   };
 

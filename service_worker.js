@@ -105,3 +105,21 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     console.error("PDTM Service Worker Error:", err);
   });
 }, { url: [{ schemes: ['http', 'https'] }] });
+
+// 4. Message Listener (UI Communication)
+// Allows the UI to trigger cleanup via the proper serialized queue.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'RUN_CLEANUP') {
+    // Join the queue to avoid race conditions with incoming navigation events
+    updateQueue = updateQueue.then(async () => {
+      const stats = await performRetentionCheck(chrome.storage.local, message.force);
+      return stats;
+    }).then((stats) => {
+      sendResponse({ success: true, stats });
+    }).catch((err) => {
+      console.error("Manual Cleanup Error:", err);
+      sendResponse({ success: false, error: err.message });
+    });
+    return true; // Keep channel open for async response
+  }
+});

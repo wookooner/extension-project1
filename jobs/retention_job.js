@@ -49,6 +49,10 @@ export async function performRetentionCheck(storageAPI, force = false) {
 
   // 4. Prune Inactive Domains (Time-based TTL)
   // Logic: Keep if (now - last_seen) < (ttl_days * 24h)
+  // [Architecture Note / Future Risk]
+  // Currently, we prune strictly by timestamp.
+  // In later chapters, we may need a "Risk Classification" or "User Whitelist" check
+  // to ensure critical or high-risk domains are not forgotten even if inactive.
   if (policy.prune_inactive_domains_days > 0) {
     const cutoff = now - (policy.prune_inactive_domains_days * 86400000);
     const domains = Object.keys(domainStates);
