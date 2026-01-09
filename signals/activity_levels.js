@@ -8,7 +8,3 @@ export const ActivityLevel = {
   UGC: "ugc",                 // Creation, editing, posting
   TRANSACTION: "transaction"  // Checkout, payment, high-risk actions
 };
-
-// Types removed for JS compatibility
-// export type ActivityConfidence = "low" | "medium" | "high";
-// export interface ActivityEstimation ...
