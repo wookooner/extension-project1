@@ -2,22 +2,18 @@
 // Role: Sensor & Storage Coordinator
 // Logic: Navigation -> Filter -> Dedupe -> Store Event -> Update Domain State
 // Updated for Chapter 3: Triggers Retention Check
+// Updated for Chapter 4: Activity Classification (Navigation + DOM Signals)
 
 import { updateDomainState } from './storage/domain_state.js';
 import { performRetentionCheck } from './jobs/retention_job.js';
+import { classify } from './jobs/classifier_job.js';
+import { updateActivityState } from './storage/activity_state.js';
 
 const SETTINGS_KEY = 'pdtm_settings_v1';
 const EVENTS_KEY = 'pdtm_events_v1';
 const MAX_EVENTS_DEFAULT = 1000;
 
 // Promise Chain for Serialization (Mutex-like behavior)
-// This ensures that concurrent navigation events do not overwrite storage updates.
-//
-// [Architecture Note]
-// Currently, this queue is unbounded. If events trigger faster than storage writes,
-// the queue length and memory usage will grow.
-// For Chapter 2 scale (personal browsing), this is acceptable.
-// Future optimization (Chapter 4+): Implement coalescing (batching last update) or a bounded buffer.
 let updateQueue = Promise.resolve();
 
 // 1. Utility: Extract Hostname
@@ -41,9 +37,8 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 
-// 3. Main Event Listener
+// 3. Main Event Listener (Navigation)
 chrome.webNavigation.onCompleted.addListener((details) => {
-  // Enqueue the operation to prevent race conditions
   updateQueue = updateQueue.then(async () => {
     
     // Filter: Main Frame only
@@ -69,7 +64,7 @@ chrome.webNavigation.onCompleted.addListener((details) => {
       }
     }
 
-    // A. Store Raw Event (Log)
+    // A. Store Raw Event
     const newEvent = {
       ts: timestamp,
       domain: domain,
@@ -78,16 +73,18 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     const updatedEvents = [newEvent, ...events].slice(0, settings.maxEvents);
     await chrome.storage.local.set({ [EVENTS_KEY]: updatedEvents });
     
-    // B. Update Domain State (Aggregation)
-    // Critical: This is now serialized via updateQueue
+    // B. Update Domain State (Basic Stats)
     await updateDomainState(domain, timestamp, chrome.storage.local);
+
+    // C. Chapter 4: Activity Classification (URL-based)
+    const estimation = classify(details.url, []); // No explicit signals yet
+    await updateActivityState(domain, estimation, timestamp, chrome.storage.local);
     
-    // C. Update Badge (UX Improvement: Show "Today's" count)
+    // D. Update Badge
     const startOfToday = new Date().setHours(0, 0, 0, 0);
     const todayCount = updatedEvents.filter(e => e.ts >= startOfToday).length;
     
     if (todayCount > 0) {
-      // Use a shorthand if > 999 (e.g., 1k+)
       const text = todayCount > 999 ? '1k+' : todayCount.toString();
       chrome.action.setBadgeText({ text });
       chrome.action.setBadgeBackgroundColor({ color: '#6366f1' }); 
@@ -95,10 +92,7 @@ chrome.webNavigation.onCompleted.addListener((details) => {
       chrome.action.setBadgeText({ text: '' });
     }
 
-    // D. Chapter 3: Retention Check
-    // Opportunistically check if cleanup is needed.
-    // We await this to ensure it respects the queue lock (no parallel storage writes).
-    // The job itself throttles (checks interval) so it's cheap to call often.
+    // E. Retention Check
     await performRetentionCheck(chrome.storage.local);
 
   }).catch(err => {
@@ -106,11 +100,10 @@ chrome.webNavigation.onCompleted.addListener((details) => {
   });
 }, { url: [{ schemes: ['http', 'https'] }] });
 
-// 4. Message Listener (UI Communication)
-// Allows the UI to trigger cleanup via the proper serialized queue.
+// 4. Message Listener (UI & Content Scripts)
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // A. Manual Cleanup (UI)
   if (message.type === 'RUN_CLEANUP') {
-    // Join the queue to avoid race conditions with incoming navigation events
     updateQueue = updateQueue.then(async () => {
       const stats = await performRetentionCheck(chrome.storage.local, message.force);
       return stats;
@@ -120,6 +113,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.error("Manual Cleanup Error:", err);
       sendResponse({ success: false, error: err.message });
     });
-    return true; // Keep channel open for async response
+    return true; 
+  }
+
+  // B. Activity Signal (Content Script)
+  if (message.type === 'ACTIVITY_SIGNAL') {
+    // Only accept from trusted content scripts (sender.tab must exist)
+    if (!sender.tab || !sender.tab.url) return;
+
+    const domain = getDomain(sender.tab.url);
+    if (!domain) return;
+
+    updateQueue = updateQueue.then(async () => {
+      const { payload } = message; // { url, signals, timestamp }
+      
+      // Re-classify using the DOM signals
+      const estimation = classify(payload.url, payload.signals);
+      
+      // Update State
+      await updateActivityState(domain, estimation, payload.timestamp, chrome.storage.local);
+      console.log(`[PDTM] DOM Signal processed for ${domain}:`, estimation.level);
+
+    }).catch(err => {
+      console.error("Signal Processing Error:", err);
+    });
   }
 });

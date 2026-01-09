@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Personal Digital Trace Manager",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Local-first digital footprint manager. Collects domain visits locally.",
   "permissions": [
     "storage",
@@ -17,5 +17,12 @@
   "action": {
     "default_popup": "index.html",
     "default_title": "PDTM"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content_probe.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }
