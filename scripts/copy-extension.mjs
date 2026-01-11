@@ -20,28 +20,12 @@ function copyDir(srcDir, dstDir) {
 }
 
 // ============================================================================
-// P0-1 개선: dist 폴더 전체 삭제 후 재생성 (이전 빌드 찌꺼기 제거)
-// ============================================================================
-console.log("🧹 Cleaning dist directory...");
-if (fs.existsSync(dist)) {
-  fs.rmSync(dist, { recursive: true, force: true });
-  console.log("✓ Previous dist removed");
-}
-fs.mkdirSync(dist, { recursive: true });
-console.log("✓ Fresh dist directory created\n");
-
-// ============================================================================
 // 필수 파일 및 디렉토리 정의
 // ============================================================================
 
 const REQUIRED_FILES = [
   "manifest.json",
   "service_worker.js",
-  // P1-1: popup.html이 필요하다면 여기에 추가
-  // 현재 manifest.json의 action.default_popup이 "index.html"을 사용하므로
-  // popup.html은 불필요 (Vite가 index.html 생성)
-  // 만약 popup.html을 사용한다면 아래 주석 해제:
-  // "popup.html",
 ];
 
 const REQUIRED_DIRS = [
@@ -49,12 +33,29 @@ const REQUIRED_DIRS = [
   "jobs",
   "storage",
   "signals",
-  "ui",        // P0-2: UI 폴더 추가 (view_models.js, constants.js 등)
-  // P1-2: 아이콘 및 정적 리소스 폴더 추가
-  // 프로젝트에 해당 폴더가 있다면 주석 해제:
-  // "assets",
-  // "icons",
+  "ui",
 ];
+
+// ============================================================================
+// P0-1 수정: dist 전체 삭제 대신 확장 런타임 폴더만 Refresh
+// Vite 빌드 결과물(assets, index.html 등)을 보존하기 위함
+// ============================================================================
+console.log("🧹 Cleaning extension runtime directories in dist/...");
+
+// Ensure dist exists (in case vite build wasn't run first, though unlikely)
+if (!fs.existsSync(dist)) {
+  fs.mkdirSync(dist, { recursive: true });
+}
+
+// Clean only the specific extension folders defined in REQUIRED_DIRS
+for (const dirName of REQUIRED_DIRS) {
+  const targetDir = path.join(dist, dirName);
+  if (fs.existsSync(targetDir)) {
+    fs.rmSync(targetDir, { recursive: true, force: true });
+    console.log(`  ✓ Removed old dist/${dirName}`);
+  }
+}
+console.log("✓ Extension runtime cleanup done\n");
 
 // ============================================================================
 // 1) 필수 파일 복사
@@ -95,6 +96,9 @@ for (const d of REQUIRED_DIRS) {
 }
 console.log(`✓ ${dirsCopied} director${dirsCopied !== 1 ? 'ies' : 'y'} copied\n`);
 
+console.log("✅ Extension assets copied to dist/");
+console.log("━".repeat(60));
+
 // ============================================================================
 // 유틸리티: 디렉토리 내 파일 개수 계산
 // ============================================================================
@@ -109,6 +113,3 @@ function countFiles(dir) {
   }
   return count;
 }
-
-console.log("✅ Extension assets copied to dist/");
-console.log("━".repeat(60));
