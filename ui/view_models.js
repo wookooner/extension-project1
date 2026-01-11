@@ -112,7 +112,7 @@ export function buildSoftList(domainStates, activityStates, riskStates, override
  */
 export function buildOverviewStats(events, hardList, softList, policy) {
   const startOfToday = new Date().setHours(0, 0, 0, 0);
-  // Ensure we handle timestamp vs legacy data gracefully
+  // Ensure we handle timestamp vs legacy data gracefully (P1 fix)
   const todayCount = events.filter(e => (e.ts || 0) >= startOfToday).length;
 
   return {

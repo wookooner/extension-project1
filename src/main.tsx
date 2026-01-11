@@ -138,7 +138,7 @@ const Popup = () => {
     const data = await api.get(keys);
     
     setEvents(data[EVENTS_KEY] || []);
-    // P0-2: Functional update to prevent stale closures
+    // P0-2: Functional update to prevent stale closures, safely merging with defaults/previous
     setSettings(prev => ({ ...prev, ...(data[SETTINGS_KEY] || {}) }));
     
     setDomainStates(data[DOMAIN_STATE_KEY] || {});
@@ -167,15 +167,21 @@ const Popup = () => {
   const softList = useMemo(() => buildSoftList(domainStates, activityStates, riskStates, overrides, settings.softThreshold || UI_CONSTANTS.SOFT_THRESHOLD_DEFAULT), [domainStates, activityStates, riskStates, overrides, settings.softThreshold]);
   const overviewStats = useMemo(() => buildOverviewStats(events, hardList, softList, policy), [events, hardList, softList, policy]);
   
-  // P1-1: Sort by latest first
+  // P1-1: Sort by latest first (descending timestamp) before slicing
   const recentList = useMemo(() => {
-    return [...events].sort((a, b) => b.ts - a.ts).slice(0, 30);
+    return [...events].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 30);
   }, [events]);
 
   // Handlers
+  
+  // P0-2: Stale closure safe update
   const togglePause = async () => {
-    await api.set({ [SETTINGS_KEY]: { ...settings, collectionEnabled: !settings.collectionEnabled } });
-    loadData();
+    setSettings(prev => {
+      const newSettings = { ...prev, collectionEnabled: !prev.collectionEnabled };
+      // Fire and forget storage update, relying on listener or subsequent loads for sync
+      api.set({ [SETTINGS_KEY]: newSettings });
+      return newSettings;
+    });
   };
 
   const updateOverride = async (domain: string, partial: any) => {
@@ -194,7 +200,7 @@ const Popup = () => {
     if (isExtensionEnv) await chrome.runtime.sendMessage({ type: 'RUN_CLEANUP', force: true });
   };
 
-  // P0-1: Full Factory Reset
+  // P0-1: Full Factory Reset (Clears ALL state)
   const resetAll = async () => {
     if (confirm("Factory Reset: Clear all history, settings, and learned rules? This cannot be undone.")) {
         await api.set({ 
@@ -512,14 +518,17 @@ const Popup = () => {
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Review Threshold</h3>
               <div className="flex items-center gap-2 bg-white border border-slate-200 p-2 rounded-lg">
                  <AlertTriangle size={16} className="text-amber-500"/>
+                 {/* P0-2: Stale closure safe update */}
                  <input 
                    type="number" 
                    value={settings.softThreshold} 
                    onChange={(e) => {
                      const val = parseInt(e.target.value) || 0;
-                     api.set({ [SETTINGS_KEY]: { ...settings, softThreshold: val } });
-                     // Optimistic update
-                     setSettings(prev => ({ ...prev, softThreshold: val }));
+                     setSettings(prev => {
+                       const newSettings = { ...prev, softThreshold: val };
+                       api.set({ [SETTINGS_KEY]: newSettings });
+                       return newSettings;
+                     });
                    }}
                    className="flex-1 text-sm outline-none"
                  />
