@@ -200,19 +200,39 @@ const Popup = () => {
     if (isExtensionEnv) await chrome.runtime.sendMessage({ type: 'RUN_CLEANUP', force: true });
   };
 
-  // P0-1: Full Factory Reset (Clears ALL state)
+  // P0-1: Full Factory Reset (Clears ALL state via Service Worker SSOT)
   const resetAll = async () => {
     if (confirm("Factory Reset: Clear all history, settings, and learned rules? This cannot be undone.")) {
-        await api.set({ 
-            [EVENTS_KEY]: [], 
-            [DOMAIN_STATE_KEY]: {}, 
-            [ACTIVITY_STATE_KEY]: {}, 
-            [RISK_STATE_KEY]: {},
-            [USER_OVERRIDES_KEY]: {},
-            [POLICY_KEY]: { last_cleanup_ts: 0 },
-            [SETTINGS_KEY]: { collectionEnabled: true, maxEvents: 1000, softThreshold: UI_CONSTANTS.SOFT_THRESHOLD_DEFAULT }
-        });
-        loadData();
+        if (isExtensionEnv) {
+            try {
+                // Request Reset from Service Worker (SSOT)
+                const res = await chrome.runtime.sendMessage({ type: 'RESET_ALL' });
+                if (res && res.success) {
+                    await loadData();
+                    setActiveTab(UI_CONSTANTS.TABS.OVERVIEW);
+                } else {
+                    alert("Reset failed: " + (res?.error || "Unknown error"));
+                }
+            } catch (e) {
+                console.error("Reset Message Failed:", e);
+                alert("Could not communicate with background service.");
+            }
+        } else {
+            // Preview Mode: Manual Reset
+            localStorage.clear();
+            const defaults = {
+                [EVENTS_KEY]: [], 
+                [DOMAIN_STATE_KEY]: {}, 
+                [ACTIVITY_STATE_KEY]: {}, 
+                [RISK_STATE_KEY]: {},
+                [USER_OVERRIDES_KEY]: {},
+                [POLICY_KEY]: { last_cleanup_ts: 0 },
+                [SETTINGS_KEY]: { collectionEnabled: true, maxEvents: 1000, softThreshold: UI_CONSTANTS.SOFT_THRESHOLD_DEFAULT }
+            };
+            await api.set(defaults);
+            await loadData();
+            setActiveTab(UI_CONSTANTS.TABS.OVERVIEW);
+        }
     }
   };
 
