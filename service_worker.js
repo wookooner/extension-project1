@@ -68,10 +68,13 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 // Chapter 1: Opener Detection (High Reliability)
-chrome.webNavigation.onCreatedNavigationTarget.addListener(async (details) => {
+chrome.webNavigation.onCreatedNavigationTarget.addListener((details) => {
   // details.sourceTabId is the opener
   if (details.sourceTabId && details.tabId) {
-    await recordTabOpener(details.tabId, details.sourceTabId, true);
+    // Fix: Serialize via updateQueue to prevent race conditions with recordTemporalEvent
+    updateQueue = updateQueue.then(async () => {
+      await recordTabOpener(details.tabId, details.sourceTabId, true);
+    }).catch(err => console.error("[PDTM] onCreatedNavTarget Error:", err));
   }
 });
 
