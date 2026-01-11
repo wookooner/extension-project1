@@ -18,6 +18,8 @@ const LEVEL_PRIORITY = {
  * Builds the "Needs Management" (Hard) List
  * Rule: Activity Level in {ACCOUNT, UGC, TRANSACTION}
  * Sort: Level Priority > Risk Score > Last Seen
+ * 
+ * @param {Object} domainStates - Domain stats (visit counts). Reserved for future use.
  */
 export function buildHardList(domainStates, activityStates, riskStates, overrides) {
   return Object.keys(activityStates)
@@ -64,6 +66,8 @@ export function buildHardList(domainStates, activityStates, riskStates, override
  * Builds the "Review" (Soft) List
  * Rule: Activity Level == VIEW AND (Score >= Threshold OR High Freq)
  * Note: High frequency is usually baked into the score, so we rely on Score.
+ * 
+ * @param {Object} domainStates - Domain stats. Reserved for future use.
  */
 export function buildSoftList(domainStates, activityStates, riskStates, overrides, threshold = 25) {
   return Object.keys(activityStates)
@@ -108,7 +112,8 @@ export function buildSoftList(domainStates, activityStates, riskStates, override
  */
 export function buildOverviewStats(events, hardList, softList, policy) {
   const startOfToday = new Date().setHours(0, 0, 0, 0);
-  const todayCount = events.filter(e => e.ts >= startOfToday).length;
+  // Ensure we handle timestamp vs legacy data gracefully
+  const todayCount = events.filter(e => (e.ts || 0) >= startOfToday).length;
 
   return {
     todayCount,

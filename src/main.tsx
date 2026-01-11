@@ -22,7 +22,8 @@ import {
   Tag,
   ListFilter,
   Inbox,
-  Briefcase
+  Briefcase,
+  Undo2
 } from 'lucide-react';
 import { ActivityLevels } from '../signals/activity_levels.js';
 import { UI_CONSTANTS } from '../ui/constants.js';
@@ -129,7 +130,7 @@ const Popup = () => {
   const [overrides, setOverrides] = useState<Record<string, any>>({});
   const [settings, setSettings] = useState<AppSettings>({ collectionEnabled: true, maxEvents: 1000, softThreshold: UI_CONSTANTS.SOFT_THRESHOLD_DEFAULT });
   const [policy, setPolicy] = useState<any>({});
-  // Unused for list building but needed for cleaning
+  // Reserved for future use (stats aggregation)
   const [domainStates, setDomainStates] = useState<Record<string, any>>({});
 
   const loadData = async () => {
@@ -137,7 +138,9 @@ const Popup = () => {
     const data = await api.get(keys);
     
     setEvents(data[EVENTS_KEY] || []);
-    setSettings({ ...settings, ...(data[SETTINGS_KEY] || {}) });
+    // P0-2: Functional update to prevent stale closures
+    setSettings(prev => ({ ...prev, ...(data[SETTINGS_KEY] || {}) }));
+    
     setDomainStates(data[DOMAIN_STATE_KEY] || {});
     setActivityStates(data[ACTIVITY_STATE_KEY] || {});
     setRiskStates(data[RISK_STATE_KEY] || {});
@@ -163,7 +166,11 @@ const Popup = () => {
   const hardList = useMemo(() => buildHardList(domainStates, activityStates, riskStates, overrides), [domainStates, activityStates, riskStates, overrides]);
   const softList = useMemo(() => buildSoftList(domainStates, activityStates, riskStates, overrides, settings.softThreshold || UI_CONSTANTS.SOFT_THRESHOLD_DEFAULT), [domainStates, activityStates, riskStates, overrides, settings.softThreshold]);
   const overviewStats = useMemo(() => buildOverviewStats(events, hardList, softList, policy), [events, hardList, softList, policy]);
-  const recentList = useMemo(() => events.slice(0, 30), [events]); // Limit recent
+  
+  // P1-1: Sort by latest first
+  const recentList = useMemo(() => {
+    return [...events].sort((a, b) => b.ts - a.ts).slice(0, 30);
+  }, [events]);
 
   // Handlers
   const togglePause = async () => {
@@ -187,17 +194,28 @@ const Popup = () => {
     if (isExtensionEnv) await chrome.runtime.sendMessage({ type: 'RUN_CLEANUP', force: true });
   };
 
+  // P0-1: Full Factory Reset
   const resetAll = async () => {
-    if (confirm("Reset everything?")) {
+    if (confirm("Factory Reset: Clear all history, settings, and learned rules? This cannot be undone.")) {
         await api.set({ 
             [EVENTS_KEY]: [], 
             [DOMAIN_STATE_KEY]: {}, 
             [ACTIVITY_STATE_KEY]: {}, 
-            [RISK_STATE_KEY]: {} 
+            [RISK_STATE_KEY]: {},
+            [USER_OVERRIDES_KEY]: {},
+            [POLICY_KEY]: { last_cleanup_ts: 0 },
+            [SETTINGS_KEY]: { collectionEnabled: true, maxEvents: 1000, softThreshold: UI_CONSTANTS.SOFT_THRESHOLD_DEFAULT }
         });
         loadData();
     }
   };
+
+  // P1-2: Ignored List Helper
+  const ignoredList = useMemo(() => {
+    return Object.keys(overrides)
+      .filter(d => overrides[d].ignored)
+      .map(d => ({ domain: d, ...overrides[d] }));
+  }, [overrides]);
 
   if (loading) return <div className="h-full flex items-center justify-center text-slate-400">Loading...</div>;
 
@@ -379,7 +397,12 @@ const Popup = () => {
                                <button onClick={() => updateOverride(item.domain, { pinned: !item.pinned })} className={`p-1.5 rounded hover:bg-slate-200 ${item.pinned ? 'text-indigo-600 bg-indigo-50' : 'text-slate-400'}`}>
                                  <Pin size={14} />
                                </button>
-                               <button onClick={() => updateOverride(item.domain, { whitelisted: !item.whitelisted })} className={`p-1.5 rounded hover:bg-slate-200 ${item.whitelisted ? 'text-emerald-600 bg-emerald-50' : 'text-slate-400'}`}>
+                               {/* P1-3: Whitelist Tooltip */}
+                               <button 
+                                  onClick={() => updateOverride(item.domain, { whitelisted: !item.whitelisted })} 
+                                  className={`p-1.5 rounded hover:bg-slate-200 ${item.whitelisted ? 'text-emerald-600 bg-emerald-50' : 'text-slate-400'}`}
+                                  title="Mark as Safe: Reduces attention score but keeps in Managed list."
+                               >
                                  <CheckCircle size={14} />
                                </button>
                             </div>
@@ -496,7 +519,7 @@ const Popup = () => {
                      const val = parseInt(e.target.value) || 0;
                      api.set({ [SETTINGS_KEY]: { ...settings, softThreshold: val } });
                      // Optimistic update
-                     setSettings({ ...settings, softThreshold: val });
+                     setSettings(prev => ({ ...prev, softThreshold: val }));
                    }}
                    className="flex-1 text-sm outline-none"
                  />
@@ -506,9 +529,30 @@ const Popup = () => {
                 Domains with only "view" activity will appear in the Review tab if their score exceeds this value.
               </p>
             </div>
+            
+            {/* P1-2: Hidden Items Management */}
+            {ignoredList.length > 0 && (
+              <div className="space-y-2">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Hidden Items ({ignoredList.length})</h3>
+                <div className="bg-white border border-slate-200 rounded-lg max-h-32 overflow-y-auto divide-y divide-slate-100">
+                  {ignoredList.map(item => (
+                    <div key={item.domain} className="px-3 py-2 flex items-center justify-between">
+                       <span className="text-xs font-medium text-slate-600 truncate">{item.domain}</span>
+                       <button 
+                         onClick={() => updateOverride(item.domain, { ignored: false })}
+                         className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded"
+                         title="Restore"
+                       >
+                         <Undo2 size={12} />
+                       </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
-            <div className="space-y-2">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Danger Zone</h3>
+            <div className="space-y-2 pt-2 border-t border-slate-200">
+              <h3 className="text-xs font-bold text-rose-400 uppercase tracking-wider">Danger Zone</h3>
               <button onClick={runCleanup} className="w-full py-2 bg-slate-100 text-slate-600 border border-slate-200 rounded-lg text-xs font-bold hover:bg-slate-200 flex items-center justify-center gap-2">
                  <Eraser size={14} /> Run Retention Policy Now
               </button>
