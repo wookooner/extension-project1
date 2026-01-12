@@ -3,6 +3,7 @@
 // Logic: Hard/Soft separation, sorting rules
 
 import { ActivityLevels } from '../signals/activity_levels.js';
+import { isManaged, isSurfaced } from '../storage/management_state.js';
 
 /**
  * Priorities for Hard List sorting
@@ -16,20 +17,19 @@ const LEVEL_PRIORITY = {
 
 /**
  * Builds the "Needs Management" (Hard) List
- * Rule: Activity Level in {ACCOUNT, UGC, TRANSACTION}
+ * Rule: management_state implies Managed (SUGGESTED or PINNED)
  * Sort: Level Priority > Risk Score > Last Seen
- * 
- * @param {Object} domainStates - Domain stats (visit counts). Reserved for future use.
  */
 export function buildHardList(domainStates, activityStates, riskStates, overrides) {
   return Object.keys(activityStates)
     .filter(domain => {
-      const level = activityStates[domain]?.last_estimation_level;
-      const isIgnored = overrides[domain]?.ignored;
-      // Filter logic
-      return !isIgnored && 
-             level && 
-             level !== ActivityLevels.VIEW;
+      // Use the Management State stored in activity state (calculated by classifier)
+      const state = activityStates[domain]?.management_state;
+      
+      // Fallback: If no management_state (legacy data), check overrides
+      const isPinned = overrides[domain]?.pinned;
+      
+      return isManaged(state) || isPinned;
     })
     .map(domain => {
       const activity = activityStates[domain];
@@ -39,16 +39,21 @@ export function buildHardList(domainStates, activityStates, riskStates, override
       return {
         domain,
         level: activity.last_estimation_level,
-        score: risk.score,
+        score: activity.risk_score || risk.score, // Use fresh score if available
         last_seen: activity.last_estimation_ts,
         reasons: risk.reasons || [],
+        explanation: activity.explanation || "Detected activity", // Chapter 4 Explainability
         pinned: !!override.pinned,
         whitelisted: !!override.whitelisted,
         category: override.category,
-        count_map: activity.counts_by_level
+        count_map: activity.counts_by_level,
+        state: activity.management_state
       };
     })
     .sort((a, b) => {
+      // 0. Pinned First
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+
       // 1. Level Priority
       const prioDiff = LEVEL_PRIORITY[b.level] - LEVEL_PRIORITY[a.level];
       if (prioDiff !== 0) return prioDiff;
@@ -64,22 +69,30 @@ export function buildHardList(domainStates, activityStates, riskStates, override
 
 /**
  * Builds the "Review" (Soft) List
- * Rule: Activity Level == VIEW AND (Score >= Threshold OR High Freq)
- * Note: High frequency is usually baked into the score, so we rely on Score.
- * 
- * @param {Object} domainStates - Domain stats. Reserved for future use.
+ * Rule: management_state implies Surfaced but NOT Managed (NEEDS_REVIEW)
  */
 export function buildSoftList(domainStates, activityStates, riskStates, overrides, threshold = 25) {
   return Object.keys(activityStates)
     .filter(domain => {
-      const level = activityStates[domain]?.last_estimation_level;
-      const risk = riskStates[domain] || { score: 0 };
+      const activity = activityStates[domain];
+      const state = activity?.management_state;
       const isIgnored = overrides[domain]?.ignored;
+
+      // Logic: Must be surfaced (Review/Suggested/Pinned) but NOT Managed (Suggested/Pinned)
+      // AND not ignored.
+      // Essentially: state === NEEDS_REVIEW
+      // Note: We also support the legacy threshold for fallback or user settings adjustment logic if needed, 
+      // but strictly following Chapter 4, we use the state.
       
-      // Filter logic
-      return !isIgnored &&
-             level === ActivityLevels.VIEW &&
-             risk.score >= threshold;
+      // For MVP transition: If state exists, use it. If not, fallback to legacy view check.
+      if (state) {
+        return !isIgnored && state === 'needs_review';
+      }
+      
+      // Legacy Fallback
+      return !isIgnored && 
+             activity?.last_estimation_level === ActivityLevels.VIEW &&
+             (riskStates[domain]?.score || 0) >= threshold;
     })
     .map(domain => {
       const activity = activityStates[domain];
@@ -88,13 +101,15 @@ export function buildSoftList(domainStates, activityStates, riskStates, override
 
       return {
         domain,
-        level: ActivityLevels.VIEW,
-        score: risk.score,
+        level: activity.last_estimation_level,
+        score: activity.risk_score || risk.score,
         last_seen: activity.last_estimation_ts,
         reasons: risk.reasons || [],
+        explanation: activity.explanation,
         pinned: !!override.pinned,
         whitelisted: !!override.whitelisted,
-        category: override.category
+        category: override.category,
+        state: activity.management_state
       };
     })
     .sort((a, b) => {
@@ -112,7 +127,6 @@ export function buildSoftList(domainStates, activityStates, riskStates, override
  */
 export function buildOverviewStats(events, hardList, softList, policy) {
   const startOfToday = new Date().setHours(0, 0, 0, 0);
-  // Ensure we handle timestamp vs legacy data gracefully (P1 fix)
   const todayCount = events.filter(e => (e.ts || 0) >= startOfToday).length;
 
   return {
@@ -127,6 +141,6 @@ export function buildOverviewStats(events, hardList, softList, policy) {
  * Checks if a domain is in the Hard list (to show "Managed" badge in Recent)
  */
 export function isManagedDomain(domain, activityStates) {
-  const level = activityStates[domain]?.last_estimation_level;
-  return level && level !== ActivityLevels.VIEW;
+  const state = activityStates[domain]?.management_state;
+  return isManaged(state);
 }

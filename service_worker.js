@@ -104,12 +104,14 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     if (!domain) return;
 
     // Fetch Data
-    const data = await chrome.storage.local.get([KEYS.EVENTS, KEYS.SETTINGS]);
+    const data = await chrome.storage.local.get([KEYS.EVENTS, KEYS.SETTINGS, KEYS.DOMAIN_STATE, KEYS.USER_OVERRIDES]);
     const settings = data[KEYS.SETTINGS] || DEFAULTS.SETTINGS;
     
     if (!settings.collectionEnabled) return;
 
     const events = data[KEYS.EVENTS] || [];
+    const domainStates = data[KEYS.DOMAIN_STATE] || {};
+    const overrides = data[KEYS.USER_OVERRIDES] || {};
     const timestamp = Date.now();
 
     // Dedupe (Burst Prevention: < 2s)
@@ -130,11 +132,20 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     await chrome.storage.local.set({ [KEYS.EVENTS]: updatedEvents });
     
     // B. Update Domain State (Basic Stats)
+    // We do this first so we have accurate counts for the classifier
     await updateDomainState(domain, timestamp, chrome.storage.local);
+    
+    // Refresh local count from the update we just did (or previous value + 1)
+    const currentVisitCount = (domainStates[domain]?.visit_count_total || 0) + 1;
+    const isPinned = !!overrides[domain]?.pinned;
 
     // C. Chapter 4/3: Activity Classification (URL-based + Context)
-    // Updated: Pass tabId for RP Inference
-    const estimation = await classify(details.url, [], { tabId: details.tabId }); 
+    // Updated: Pass tabId for RP Inference AND visitCount for Risk Logic
+    const estimation = await classify(details.url, [], { 
+      tabId: details.tabId,
+      visitCount: currentVisitCount,
+      isPinned: isPinned
+    }); 
     await updateActivityState(domain, estimation, timestamp, chrome.storage.local);
 
     // D. Chapter 5: Risk Calculation

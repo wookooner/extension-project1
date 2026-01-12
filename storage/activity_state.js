@@ -14,13 +14,19 @@ export const ACTIVITY_STATE_KEY = 'pdtm_activity_state_v1';
  * @property {Object.<string, number>} counts_by_level - { view: 10, account: 2 ... }
  * @property {number} [last_account_touch_ts]
  * @property {number} [last_transaction_signal_ts]
+ * 
+ * -- Chapter 4 Additions --
+ * @property {number} [risk_score] - 0-100 score from Classifier
+ * @property {number} [risk_confidence] - 0-1 confidence from Classifier
+ * @property {string} [management_state] - MANAGEMENT_STATE enum
+ * @property {string} [explanation] - Human readable reason
  */
 
 /**
  * Updates the activity state for a domain based on a new estimation.
  * Handles "Upgrade" logic to prevent double-counting for the same visit.
  * @param {string} domain 
- * @param {Object} estimation - { level, confidence, reasons }
+ * @param {Object} estimation - { level, confidence, reasons, risk_score, management_state, explanation }
  * @param {number} timestamp 
  * @param {Object} storageAPI 
  */
@@ -44,15 +50,6 @@ export async function updateActivityState(domain, estimation, timestamp, storage
   // If this update is very close to the last one (e.g., < 10 seconds), 
   // treat it as a "refinement" of the current visit rather than a new one.
   const isReclassification = (timestamp - record.last_estimation_ts < 10000);
-
-  // [Architecture Note]
-  // Strategy: "Highest Level per Visit"
-  // When re-classifying (upgrading) a visit within the time window, we decrement the old level count
-  // and increment the new one.
-  // Example: View (passive) -> Account (login). 
-  // Result: 0 Views, 1 Account visit.
-  // Rationale: We want to track the "nature" of the visit, not every micro-step.
-  // This avoids inflating the total visit count. For funnel analysis, a different data model would be needed.
 
   if (isReclassification) {
     // Check if level changed (Upgrade/Change)
@@ -79,6 +76,12 @@ export async function updateActivityState(domain, estimation, timestamp, storage
   // 2. Update Metadata
   record.last_estimation_level = estimation.level;
   record.last_estimation_ts = timestamp;
+
+  // Chapter 4: Persist Risk & State
+  if (estimation.risk_score !== undefined) record.risk_score = estimation.risk_score;
+  if (estimation.risk_confidence !== undefined) record.risk_confidence = estimation.risk_confidence;
+  if (estimation.management_state) record.management_state = estimation.management_state;
+  if (estimation.explanation) record.explanation = estimation.explanation;
 
   // 3. Track specific critical timestamps
   if (estimation.level === ActivityLevels.ACCOUNT) {

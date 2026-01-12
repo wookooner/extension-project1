@@ -2,6 +2,7 @@
 // Role: Orchestration (Input -> Signals -> Heuristics -> Estimation)
 // Updated for Chapter 2: OAuth/OIDC Detection & Privacy Guards
 // Updated for Chapter 3: RP/IdP Inference & Confidence Contract
+// Updated for Chapter 4: Risk Model & Management State
 
 import { extractUrlSignals, evaluateSignals } from '../signals/heuristics.js';
 import { SIGNAL_CODES } from '../signals/signal_codes.js';
@@ -18,6 +19,11 @@ import { getDomain } from '../utils/domain.js';
 import { createConfidenceState, addEvidenceOnce, finalizeConfidence } from '../utils/confidence.js';
 import { EVIDENCE_WEIGHTS } from '../signals/evidence_weights.js';
 import { inferRpFromRedirectUri, inferRpFromOpener, inferIdpDomain, checkTemporalRoundtrip } from '../utils/rp_inference.js';
+
+// Chapter 4 Imports
+import { computeBaseScore, computeRiskScore, computeRiskConfidence } from '../risk/risk_model.js';
+import { mapToManagementState } from '../risk/state_mapper.js';
+import { buildExplanation } from '../ui/explanations.js';
 
 /**
  * Internal: Checks for OAuth/OIDC indicators.
@@ -54,7 +60,7 @@ function detectOAuth(url) {
     const isIdPDomain = KNOWN_IDP_DOMAIN_PATTERNS.some(pattern => pattern.test(domain));
     if (isIdPDomain) {
       isOAuth = true;
-      evidence.push(EVIDENCE_TYPES.KNOWN_IDP); // Explainability update
+      evidence.push(EVIDENCE_TYPES.KNOWN_IDP); 
     }
   }
 
@@ -62,7 +68,7 @@ function detectOAuth(url) {
   const isIdPUrl = KNOWN_IDP_URL_PATTERNS.some(pattern => pattern.test(url));
   if (isIdPUrl) {
     isOAuth = true;
-    evidence.push(EVIDENCE_TYPES.KNOWN_IDP); // Treat specific URL match as IdP evidence
+    evidence.push(EVIDENCE_TYPES.KNOWN_IDP);
   }
 
   return { isOAuth, evidence };
@@ -72,7 +78,7 @@ function detectOAuth(url) {
  * Runs classification logic for a given URL and optional explicit signals.
  * @param {string} url 
  * @param {string[]} [explicitSignals] - Signals from content script or other sources
- * @param {Object} [context] - Chapter 3 Context (tabId, etc.)
+ * @param {Object} [context] - Chapter 3 Context (tabId, visitCount, etc.)
  * @returns {Promise<Object>} ActivityEstimation
  */
 export async function classify(url, explicitSignals = [], context = {}) {
@@ -95,12 +101,14 @@ export async function classify(url, explicitSignals = [], context = {}) {
   // 3. Chapter 2 & 3: OAuth/OIDC Overlay
   const oauthResult = detectOAuth(url);
   
+  // Variables for Ch4 Risk/State
+  let rpCandidate = null;
+  let idpCandidate = inferIdpDomain(url);
+  
   if (oauthResult.isOAuth) {
     // --- Chapter 3: RP/IdP Inference & Confidence ---
     const confState = createConfidenceState();
-    let rpCandidate = null;
-    let idpCandidate = inferIdpDomain(url);
-
+    
     // 3.1 Add Chapter 2 Evidence (Static indicators)
     oauthResult.evidence.forEach(evType => {
       addEvidenceOnce(confState, evType, EVIDENCE_WEIGHTS[evType]);
@@ -113,25 +121,20 @@ export async function classify(url, explicitSignals = [], context = {}) {
     // 3.3 Validate and Assign RP
     if (rpFromRedirect) {
        rpCandidate = rpFromRedirect;
-
-       // CRITICAL: Only emit REDIRECT_URI_MATCH if it validates against context.
-       // "The parameter is present" is not enough. "The parameter matches reality" is the signal.
+       // Validation check
        if (rpFromOpener && rpFromRedirect === rpFromOpener) {
          addEvidenceOnce(confState, EVIDENCE_TYPES.REDIRECT_URI_MATCH, EVIDENCE_WEIGHTS[EVIDENCE_TYPES.REDIRECT_URI_MATCH]);
        }
     } else if (rpFromOpener) {
-       // Fallback to opener if no redirect param
        rpCandidate = rpFromOpener;
     }
 
     // 3.4 Opener Evidence
     if (rpFromOpener) {
-        // If we found an opener RP, it's a context link regardless of redirect_uri match
         addEvidenceOnce(confState, EVIDENCE_TYPES.OPENER_LINK, EVIDENCE_WEIGHTS[EVIDENCE_TYPES.OPENER_LINK]);
     }
        
     // 3.5 Temporal Roundtrip (Context)
-    // Check if we have seen RP -> IdP -> RP in history
     if (rpCandidate && idpCandidate) {
       const isRoundtrip = await checkTemporalRoundtrip(context.tabId, rpCandidate, idpCandidate);
       if (isRoundtrip) {
@@ -145,13 +148,13 @@ export async function classify(url, explicitSignals = [], context = {}) {
     // 3.7 Merge into Result
     result.level = ActivityLevels.ACCOUNT;
     result.confidence = confidence >= 0.8 ? "high" : (confidence >= 0.5 ? "medium" : "low");
+    result.numericConfidence = confidence; // Important for Risk Model
     result.reasons.push("oauth_detected");
     result.evidenceFlags = evidenceFlags;
     
-    // Add inferred metadata (Optional, for debugging or UI)
+    // Add inferred metadata
     if (rpCandidate) result.rp_domain = rpCandidate;
     if (idpCandidate) result.idp_domain = idpCandidate;
-    result.numericConfidence = confidence; // For internal use
 
   } else {
     // Keyword Guard (Chapter 2 Downgrade Rule)
@@ -163,10 +166,44 @@ export async function classify(url, explicitSignals = [], context = {}) {
        if (reliesOnlyOnWeakUrl && !hasDomSignals) {
           result.level = ActivityLevels.VIEW;
           result.confidence = "low";
+          result.numericConfidence = 0.3; // Low confidence
           result.reasons = [SIGNAL_CODES.PASSIVE, "ambiguous_auth_keyword"];
+       } else {
+          // It's a valid account heuristic (e.g. DOM_PASSWORD)
+          result.numericConfidence = result.confidence === "high" ? 0.8 : 0.5;
        }
+    } else {
+        // Default VIEW or TRANSACTION/UGC from heuristics
+        result.numericConfidence = result.confidence === "high" ? 0.8 : (result.confidence === "medium" ? 0.5 : 0.3);
     }
   }
+
+  // --- Chapter 4: Risk & State Mapping ---
+  
+  // 4.1 Risk Score
+  const baseScore = computeBaseScore(result.level);
+  result.risk_score = computeRiskScore({ 
+    base: baseScore, 
+    confidence: result.numericConfidence 
+  });
+  result.risk_confidence = computeRiskConfidence({ confidence: result.numericConfidence });
+
+  // 4.2 Management State
+  result.management_state = mapToManagementState({
+    level: result.level,
+    score: result.risk_score,
+    confidence: result.numericConfidence,
+    rp_domain: rpCandidate,
+    seenCount: context.visitCount || 0,
+    isPinned: context.isPinned || false // Passed from context if needed, or handled in storage
+  });
+
+  // 4.3 Explanation
+  result.explanation = buildExplanation({
+    evidenceFlags: result.evidenceFlags,
+    rp_domain: rpCandidate,
+    idp_domain: idpCandidate
+  });
 
   return result;
 }
