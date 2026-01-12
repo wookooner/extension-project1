@@ -133,9 +133,6 @@ export async function recordTemporalEvent({ tabId, url, kind }) {
     updatedAt: now
   };
 
-  // Capacity Guard (Simple LRU approximation via Object.keys sort could be here, 
-  // but handled in GC module for performance)
-
   // 5. Save All
   await chrome.storage.session.set({
     [KEY_TAB_GRAPH]: tabGraph,
@@ -154,4 +151,35 @@ export async function getSessionContext(tabId) {
 
   const contextId = resolveContextId(tabId, tabGraph);
   return tempGraph[contextId] || null;
+}
+
+/**
+ * Chapter 3 Helper: Get the direct opener ID for a tab.
+ * @param {number} tabId 
+ * @returns {Promise<number|null>}
+ */
+export async function getTabOpenerId(tabId) {
+  const data = await chrome.storage.session.get([KEY_TAB_GRAPH]);
+  const tabGraph = data[KEY_TAB_GRAPH] || {};
+  return tabGraph[tabId]?.openerTabId || null;
+}
+
+/**
+ * Chapter 3 Helper: Find the last visited domain for a specific tab from the temporal graph.
+ * This is used to identify the RP domain from the opener tab's history.
+ * @param {number} targetTabId 
+ * @returns {Promise<string|null>}
+ */
+export async function getLastDomainForTab(targetTabId) {
+  const context = await getSessionContext(targetTabId);
+  if (!context || !context.events) return null;
+
+  // Search backwards for the most recent event matching this tabId
+  for (let i = context.events.length - 1; i >= 0; i--) {
+    const e = context.events[i];
+    if (e.tabId === targetTabId) {
+      return e.domain;
+    }
+  }
+  return null;
 }

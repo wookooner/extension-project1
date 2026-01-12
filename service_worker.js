@@ -1,7 +1,7 @@
 // --- Chapter 2: Service Worker (Background Script) ---
 // Role: Sensor & Storage Coordinator
 // Logic: Navigation -> Filter -> Dedupe -> Store Event -> Update Domain State
-// Updated for Chapter 3: Triggers Retention Check
+// Updated for Chapter 3: Triggers Retention Check & RP/IdP Inference
 // Updated for Chapter 4: Activity Classification (Navigation + DOM Signals)
 // Updated for Chapter 5: Risk Calculation & User Overrides
 // Updated for Chapter 6: Centralized Defaults & RESET_ALL Handler
@@ -132,8 +132,9 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     // B. Update Domain State (Basic Stats)
     await updateDomainState(domain, timestamp, chrome.storage.local);
 
-    // C. Chapter 4: Activity Classification (URL-based)
-    const estimation = classify(details.url, []); // No explicit signals yet
+    // C. Chapter 4/3: Activity Classification (URL-based + Context)
+    // Updated: Pass tabId for RP Inference
+    const estimation = await classify(details.url, [], { tabId: details.tabId }); 
     await updateActivityState(domain, estimation, timestamp, chrome.storage.local);
 
     // D. Chapter 5: Risk Calculation
@@ -253,8 +254,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       const { payload } = message; // { url, signals, timestamp }
       
-      // Re-classify using the DOM signals
-      const estimation = classify(payload.url, payload.signals);
+      // Re-classify using the DOM signals, pass tabId from sender
+      const estimation = await classify(payload.url, payload.signals, { tabId: sender.tab.id });
       
       // Update Activity State
       await updateActivityState(domain, estimation, payload.timestamp, chrome.storage.local);

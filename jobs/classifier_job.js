@@ -1,6 +1,7 @@
 // --- Chapter 4: Classifier Job ---
 // Role: Orchestration (Input -> Signals -> Heuristics -> Estimation)
 // Updated for Chapter 2: OAuth/OIDC Detection & Privacy Guards
+// Updated for Chapter 3: RP/IdP Inference & Confidence Contract
 
 import { extractUrlSignals, evaluateSignals } from '../signals/heuristics.js';
 import { SIGNAL_CODES } from '../signals/signal_codes.js';
@@ -12,6 +13,11 @@ import { OAUTH_CORE_KEYS, KNOWN_IDP_DOMAIN_PATTERNS, KNOWN_IDP_URL_PATTERNS } fr
 import { getParamKeys } from '../utils/url_params.js';
 import { isStrongAuthPath } from '../utils/url_path.js';
 import { getDomain } from '../utils/domain.js';
+
+// Chapter 3 Imports
+import { createConfidenceState, addEvidenceOnce, finalizeConfidence } from '../utils/confidence.js';
+import { EVIDENCE_WEIGHTS } from '../signals/evidence_weights.js';
+import { inferRpFromRedirectUri, inferRpFromOpener, inferIdpDomain, checkTemporalRoundtrip } from '../utils/rp_inference.js';
 
 /**
  * Internal: Checks for OAuth/OIDC indicators.
@@ -65,9 +71,10 @@ function detectOAuth(url) {
  * Runs classification logic for a given URL and optional explicit signals.
  * @param {string} url 
  * @param {string[]} [explicitSignals] - Signals from content script or other sources
- * @returns {Object} ActivityEstimation
+ * @param {Object} [context] - Chapter 3 Context (tabId, etc.)
+ * @returns {Promise<Object>} ActivityEstimation
  */
-export function classify(url, explicitSignals = []) {
+export async function classify(url, explicitSignals = [], context = {}) {
   // Recommendation A: Signal Vocabulary Safety Check
   const knownCodes = new Set(Object.values(SIGNAL_CODES));
   
@@ -84,47 +91,79 @@ export function classify(url, explicitSignals = []) {
   // 2. Base Classification
   let result = evaluateSignals(allSignals);
 
-  // 3. Chapter 2: OAuth/OIDC Overlay & Keyword Guard
+  // 3. Chapter 2 & 3: OAuth/OIDC Overlay
   const oauthResult = detectOAuth(url);
   
   if (oauthResult.isOAuth) {
-    // Upgrade to ACCOUNT level if not already Transaction
-    // (Transaction > Account > UGC > View)
-    if (result.level !== ActivityLevels.TRANSACTION) {
-       result.level = ActivityLevels.ACCOUNT;
-       result.confidence = "high";
-       result.reasons.push("oauth_detected");
+    // --- Chapter 3: RP/IdP Inference & Confidence ---
+    const confState = createConfidenceState();
+    let rpCandidate = null;
+    let idpCandidate = inferIdpDomain(url);
+
+    // 3.1 Add Chapter 2 Evidence
+    oauthResult.evidence.forEach(evType => {
+      addEvidenceOnce(confState, evType, EVIDENCE_WEIGHTS[evType]);
+    });
+
+    // 3.2 RP Inference: Redirect URI (Strong)
+    const rpFromRedirect = inferRpFromRedirectUri(url);
+    if (rpFromRedirect) {
+      rpCandidate = rpFromRedirect;
+      addEvidenceOnce(confState, EVIDENCE_TYPES.REDIRECT_URI_MATCH, EVIDENCE_WEIGHTS[EVIDENCE_TYPES.REDIRECT_URI_MATCH]);
     }
-  } else {
-    // Keyword Guard (Downgrade Rule)
-    // If Heuristics predicted ACCOUNT, we must check if it relied ONLY on weak URL keywords.
-    // If Strict OAuth Check failed AND no DOM signals exist, we treat it as a potential false positive (e.g. /author).
+
+    // 3.3 RP Inference: Opener (Context)
+    if (context.tabId) {
+       const rpFromOpener = await inferRpFromOpener(context.tabId);
+       if (rpFromOpener) {
+         // If we didn't find RP from redirect, use opener. 
+         // Or if they match, it strengthens confidence (but dedupe handles evidence flag).
+         if (!rpCandidate) rpCandidate = rpFromOpener;
+         
+         // Only add evidence if it aligns or is the primary source
+         if (rpCandidate === rpFromOpener) {
+            addEvidenceOnce(confState, EVIDENCE_TYPES.OPENER_LINK, EVIDENCE_WEIGHTS[EVIDENCE_TYPES.OPENER_LINK]);
+         }
+       }
+       
+       // 3.4 Temporal Roundtrip (Context)
+       // Check if we have seen RP -> IdP -> RP in history
+       if (rpCandidate && idpCandidate) {
+         const isRoundtrip = await checkTemporalRoundtrip(context.tabId, rpCandidate, idpCandidate);
+         if (isRoundtrip) {
+           addEvidenceOnce(confState, EVIDENCE_TYPES.TEMPORAL_CHAIN, EVIDENCE_WEIGHTS[EVIDENCE_TYPES.TEMPORAL_CHAIN]);
+         }
+       }
+    }
+
+    // 3.5 Calculate Final Confidence
+    const { confidence, evidenceFlags } = finalizeConfidence(confState);
+
+    // 3.6 Merge into Result
+    result.level = ActivityLevels.ACCOUNT;
+    result.confidence = confidence >= 0.8 ? "high" : (confidence >= 0.5 ? "medium" : "low");
+    result.reasons.push("oauth_detected");
+    result.evidenceFlags = evidenceFlags;
     
+    // Add inferred metadata (Optional, for debugging or UI)
+    if (rpCandidate) result.rp_domain = rpCandidate;
+    if (idpCandidate) result.idp_domain = idpCandidate;
+    result.numericConfidence = confidence; // For internal use
+
+  } else {
+    // Keyword Guard (Chapter 2 Downgrade Rule)
     if (result.level === ActivityLevels.ACCOUNT) {
-       // A. Check if reasons are exclusively URL-based keywords
-       // We ignore DOM_PASSWORD or explicit content script signals here.
        const weakUrlReasons = [SIGNAL_CODES.URL_LOGIN, SIGNAL_CODES.URL_ACCOUNT, SIGNAL_CODES.URL_SIGNUP];
        const reliesOnlyOnWeakUrl = result.reasons.every(r => weakUrlReasons.includes(r));
-       
-       // B. Check for DOM signals (Strong local evidence)
        const hasDomSignals = result.reasons.some(r => r.startsWith('dom_'));
        
        if (reliesOnlyOnWeakUrl && !hasDomSignals) {
-          // Downgrade Logic
-          // Without structural OAuth proof (params/strong-path) or DOM proof (password field),
-          // a URL containing "login" or "account" is suggestive but not definitive enough 
-          // to be classified as High Confidence Account Activity in this strict mode.
-          
-          // Downgrade to VIEW to be safe (avoiding False Positives like /author, /login-help)
           result.level = ActivityLevels.VIEW;
           result.confidence = "low";
           result.reasons = [SIGNAL_CODES.PASSIVE, "ambiguous_auth_keyword"];
        }
     }
   }
-
-  // 4. Attach Evidence Flags (Chapter 0 Contract)
-  result.evidenceFlags = oauthResult.evidence;
 
   return result;
 }
